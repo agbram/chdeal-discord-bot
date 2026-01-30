@@ -1,0 +1,13 @@
+export const PIPEFY = {
+  API_URL: 'https://api.pipefy.com/graphql',
+  PIPE_ID: 'SEU_PIPE_ID',
+
+  PHASES: {
+    BACKLOG: 'PHASE_ID_BACKLOG',
+    EM_ANDAMENTO: 'PHASE_ID_ANDAMENTO',
+    EM_REVISAO: 'PHASE_ID_REVISAO',
+    APROVADO: 'PHASE_ID_APROVADO',
+    EM_PRODUCAO: 'PHASE_ID_PRODUCAO',
+    CONCLUIDO: 'PHASE_ID_CONCLUIDO',
+  }
+};

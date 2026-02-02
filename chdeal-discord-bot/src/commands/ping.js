@@ -1,11 +1,36 @@
-const { SlashCommandBuilder } = require('discord.js');
+import { SlashCommandBuilder, EmbedBuilder } from 'discord.js';
 
-module.exports = {
+export default {
   data: new SlashCommandBuilder()
     .setName('ping')
-    .setDescription('Verifica se o bot está online'),
+    .setDescription('Verifica a latência do bot')
+    .addBooleanOption(option =>
+      option
+        .setName('oculto')
+        .setDescription('Mostrar resposta apenas para você')
+        .setRequired(false)
+    ),
 
   async execute(interaction) {
-    await interaction.reply('🏓 Pong! Bot funcionando.');
+    const ephemeral = interaction.options.getBoolean('oculto') || false;
+    
+    // Medir latência
+    const sent = await interaction.deferReply({ fetchReply: true, ephemeral });
+    const latency = sent.createdTimestamp - interaction.createdTimestamp;
+    const apiLatency = Math.round(interaction.client.ws.ping);
+
+    const embed = new EmbedBuilder()
+      .setColor('#00FF00')
+      .setTitle('🏓 Pong!')
+      .setDescription('Status de conectividade do bot:')
+      .addFields(
+        { name: '📡 Latência da API', value: `${apiLatency}ms`, inline: true },
+        { name: '⏱️ Latência do Bot', value: `${latency}ms`, inline: true },
+        { name: '🟢 Status', value: apiLatency < 100 ? 'Ótimo' : apiLatency < 300 ? 'Bom' : 'Lento', inline: true }
+      )
+      .setTimestamp()
+      .setFooter({ text: `Solicitado por ${interaction.user.username}` });
+
+    await interaction.editReply({ embeds: [embed] });
   },
 };

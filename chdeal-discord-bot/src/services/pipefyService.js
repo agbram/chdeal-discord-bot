@@ -328,7 +328,6 @@ async function fallbackAssignment(cardId, username, userEmail) {
     return null;
   }
 }
-
 // Remover responsável do card
 async function removeAssigneeFromCard(cardId) {
   console.log(`👤 Removendo responsável do card ${cardId}`);
@@ -454,7 +453,128 @@ async function isCardAvailableInTodo(cardId, userEmail = null) {
     };
   }
 }
+// pipefyService.js - Adicione estas funções
 
+// Função para atualizar campos do card
+async function updateCardFields(cardId, fields) {
+  console.log(`🔄 Atualizando campos do card ${cardId}:`, fields);
+  
+  try {
+    const updates = [];
+    
+    for (const [fieldId, value] of Object.entries(fields)) {
+      const mutation = `
+        mutation UpdateCardField($input: UpdateCardFieldInput!) {
+          updateCardField(input: $input) {
+            success
+          }
+        }
+      `;
+      
+      const variables = {
+        input: {
+          card_id: cardId,
+          field_id: fieldId,
+          new_value: value
+        }
+      };
+      
+      try {
+        const result = await graphqlRequest(mutation, variables);
+        if (result?.updateCardField?.success) {
+          console.log(`✅ Campo ${fieldId} atualizado: ${value}`);
+          updates.push({ fieldId, value, success: true });
+        } else {
+          console.log(`❌ Falha ao atualizar campo ${fieldId}`);
+          updates.push({ fieldId, value, success: false });
+        }
+      } catch (error) {
+        console.error(`❌ Erro ao atualizar campo ${fieldId}:`, error.message);
+        updates.push({ fieldId, value, success: false, error: error.message });
+      }
+      
+      // Pequena pausa para não sobrecarregar a API
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    
+    return updates;
+  } catch (error) {
+    console.error('❌ Erro em updateCardFields:', error);
+    return [];
+  }
+}
+
+// Função para limpar campos de responsável
+async function clearResponsavelFields(cardId) {
+  console.log(`🧹 Limpando campos de responsável do card ${cardId}`);
+  
+  const fieldsToClear = {};
+  
+  // Adicionar apenas se os campos estiverem configurados
+  if (process.env.PIPEFY_FIELD_RESPONSAVEL_ID) {
+    fieldsToClear[process.env.PIPEFY_FIELD_RESPONSAVEL_ID] = '';
+  }
+  
+  if (process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID) {
+    fieldsToClear[process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID] = '';
+  }
+  
+  if (Object.keys(fieldsToClear).length === 0) {
+    console.log('⚠️ Campos de responsável não configurados no .env');
+    return [];
+  }
+  
+  return await updateCardFields(cardId, fieldsToClear);
+}
+
+// Função para calcular tempo entre duas datas
+function calculateTimeBetween(startDate, endDate) {
+  const diffMs = endDate - startDate;
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+  const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+  
+  let result = [];
+  if (diffDays > 0) result.push(`${diffDays} dia${diffDays > 1 ? 's' : ''}`);
+  if (diffHours > 0) result.push(`${diffHours} hora${diffHours > 1 ? 's' : ''}`);
+  if (diffMinutes > 0) result.push(`${diffMinutes} minuto${diffMinutes > 1 ? 's' : ''}`);
+  
+  return result.length > 0 ? result.join(', ') : 'menos de 1 minuto';
+}
+
+// Função para buscar comentários de um card
+async function getCardComments(cardId) {
+  console.log(`💬 Buscando comentários do card ${cardId}`);
+  
+  try {
+    const query = `
+      query GetCardComments($id: ID!) {
+        card(id: $id) {
+          comments {
+            edges {
+              node {
+                id
+                text
+                created_at
+              }
+            }
+          }
+        }
+      }
+    `;
+    
+    const data = await graphqlRequest(query, { id: cardId });
+    
+    if (data?.card?.comments?.edges) {
+      return data.card.comments.edges.map(edge => edge.node);
+    }
+    
+    return [];
+  } catch (error) {
+    console.error('❌ Erro ao buscar comentários:', error);
+    return [];
+  }
+}
 // Adicionar comentário
 async function addComment(cardId, text) {
   console.log(`💬 Adicionando comentário ao card ${cardId}`);
@@ -574,5 +694,11 @@ export default {
   moveToEmAndamento,
   moveToConcluido,
   moveToRevisao,
-  assignUserToCard
+  assignUserToCard,
+  
+  // Novas funções para campos e comentários
+  updateCardFields,
+  clearResponsavelFields,
+  calculateTimeBetween,
+  getCardComments
 };

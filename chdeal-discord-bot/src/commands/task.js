@@ -43,11 +43,13 @@ class UserMapper {
   constructor() {
     this.mappings = new Map();
     this.reverseMappings = new Map();
+    this.fullnameMappings = new Map();
     this.loadMappings();
   }
 
   loadMappings() {
     try {
+      // Mapeamento de emails
       if (process.env.USER_MAPPINGS) {
         const parsed = JSON.parse(process.env.USER_MAPPINGS);
         Object.entries(parsed).forEach(([discordId, email]) => {
@@ -55,6 +57,15 @@ class UserMapper {
           this.reverseMappings.set(email.toLowerCase(), discordId);
         });
         console.log(`✅ Mapeamento carregado: ${this.mappings.size} usuários`);
+      }
+      
+      // Mapeamento de nomes completos
+      if (process.env.FULLNAME_MAPPINGS) {
+        const parsed = JSON.parse(process.env.FULLNAME_MAPPINGS);
+        Object.entries(parsed).forEach(([discordId, fullname]) => {
+          this.fullnameMappings.set(discordId, fullname);
+        });
+        console.log(`✅ Nomes completos carregados: ${this.fullnameMappings.size} usuários`);
       }
     } catch (error) {
       console.error('❌ Erro ao carregar mapeamento:', error);
@@ -67,6 +78,11 @@ class UserMapper {
 
   getDiscordId(email) {
     return this.reverseMappings.get(email?.toLowerCase());
+  }
+
+  // ✅ NOVO MÉTODO: Buscar nome completo
+  getFullname(discordIdOrUsername) {
+    return this.fullnameMappings.get(discordIdOrUsername);
   }
 
   addMapping(discordId, email) {
@@ -422,7 +438,7 @@ async function handlePegar(interaction, cardId, username, userId, userMapper, ta
       return interaction.editReply('❌ Erro ao mover task para "Em Andamento".');
     }
     
-    // Tentar atribuir o usuário
+    // 1. Tentar atribuir o usuário no Pipefy
     if (userEmail) {
       try {
         console.log(`🔗 Atribuindo ${username} (${userEmail}) à task...`);
@@ -434,22 +450,60 @@ async function handlePegar(interaction, cardId, username, userId, userMapper, ta
       console.log(`⚠️ Usuário ${username} não está mapeado.`);
     }
     
-    // Adicionar comentário
-    await pipefyService.addComment(cardId, `🎯 Task atribuída para ${username} via Discord Bot`);
+    // 2. Preencher os campos "Responsável" e "Email do Responsável"
+// 2. Preencher os campos "Responsável" e "Email do Responsável"
+console.log(`📝 Preenchendo campos de responsável...`);
+
+// Obter nome completo
+let responsavelNome = username; // valor padrão (username do Discord)
+
+// Tentar obter nome completo do mapeamento
+if (userMapper && userMapper.getFullname) {
+  const fullname = userMapper.getFullname(userId) || userMapper.getFullname(username);
+  if (fullname) {
+    responsavelNome = fullname;
+    console.log(`✅ Nome completo encontrado: ${fullname}`);
+  } else {
+    console.log(`ℹ️  Nome completo não mapeado para ${username}`);
+    console.log(`   Adicione ao .env: FULLNAME_MAPPINGS={"${username}": "Seu Nome Completo"}`);
+  }
+} else {
+  console.log(`ℹ️  UserMapper não tem método getFullname`);
+}
+
+const fieldsToUpdate = {
+  [process.env.PIPEFY_FIELD_RESPONSAVEL_ID]: responsavelNome
+};
+
+if (userEmail) {
+  fieldsToUpdate[process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID] = userEmail;
+}
+
+const fieldUpdates = await pipefyService.updateCardFields(cardId, fieldsToUpdate);
     
-    const embed = new EmbedBuilder()
-      .setTitle('✅ Task Atribuída!')
-      .setColor('#00FF00')
-      .setDescription(`Você agora é responsável por esta task`)
-      .addFields(
-        { name: '📝 Título', value: card.title, inline: true },
-        { name: '🆔 Pipefy ID', value: cardId, inline: true },
-        { name: '📊 Status', value: 'Em Andamento', inline: true },
-        { name: '👤 Responsável', value: username, inline: true },
-        { name: '⏰ Prazo', value: `${process.env.TASK_TIMEOUT_HOURS || 48}h`, inline: true }
-      )
-      .setFooter({ text: 'Use /task concluir id:<ID> quando finalizar o desenvolvimento' })
-      .setTimestamp();
+    // 3. Adicionar comentário com timestamp de início
+    const timestamp = new Date().toLocaleString('pt-BR');
+    await pipefyService.addComment(cardId, 
+      `🎯 **Task atribuída via Discord Bot**\n` +
+      `👤 **Responsável:** ${responsavelNome}${userEmail ? ` (${userEmail})` : ''}\n` +
+      `⏰ **Iniciado em:** ${timestamp}\n` +
+      `📊 **Status:** Em Andamento`
+    );
+    
+const embed = new EmbedBuilder()
+  .setTitle('✅ Task Atribuída!')
+  .setColor('#00FF00')
+  .setDescription(`Você agora é responsável por esta task`)
+  .addFields(
+    { name: '📝 Título', value: card.title, inline: true },
+    { name: '🆔 Pipefy ID', value: cardId, inline: true },
+    { name: '📊 Status', value: 'Em Andamento', inline: true },
+    { name: '👤 Responsável', value: responsavelNome, inline: true },  // ← CORRIGIDO!
+    { name: '⏰ Prazo', value: `${process.env.TASK_TIMEOUT_HOURS || 48}h`, inline: true },
+    { name: '📅 Iniciado em', value: timestamp, inline: true }
+  )
+  .setFooter({ text: 'Use /task concluir id:<ID> quando finalizar o desenvolvimento' })
+  .setTimestamp();
     
     if (userEmail) {
       embed.addFields({ 
@@ -473,7 +527,7 @@ async function handlePegar(interaction, cardId, username, userId, userMapper, ta
   }
 }
 
-async function handleConcluir(interaction, cardId, comentario, username, userId, userMapper) {
+async function handleConcluir(interaction, cardId, comentario, username, userId, userMapper, taskCache) {
   await interaction.deferReply();
   
   try {
@@ -670,11 +724,49 @@ async function handleLiberar(interaction, cardId, username, userId, userMapper) 
       );
     }
     
-    // 4. Remover responsável
+    // 4. Buscar comentários para encontrar quando foi atribuída
+    const comments = await pipefyService.getCardComments(cardId);
+    let tempoResponsabilidade = "Não foi possível calcular";
+    let exResponsavel = username;
+    
+    // Procurar pelo comentário de atribuição
+    const commentAttribution = comments.find(comment => 
+      comment.text && comment.text.includes('🎯 **Task atribuída via Discord Bot**')
+    );
+    
+    if (commentAttribution) {
+      // Extrair informações do comentário
+      const lines = commentAttribution.text.split('\n');
+      const responsavelLine = lines.find(line => line.includes('👤 **Responsável:**'));
+      const inicioLine = lines.find(line => line.includes('⏰ **Iniciado em:**'));
+      
+      if (responsavelLine) {
+        const match = responsavelLine.match(/👤 \*\*Responsável:\*\* (.+?)(?: \(|$)/);
+        if (match) exResponsavel = match[1];
+      }
+      
+      if (inicioLine) {
+        const match = inicioLine.match(/⏰ \*\*Iniciado em:\*\* (.+)/);
+        if (match) {
+          const dataInicio = new Date(match[1]);
+          const dataFim = new Date();
+          
+          if (!isNaN(dataInicio.getTime())) {
+            tempoResponsabilidade = pipefyService.calculateTimeBetween(dataInicio, dataFim);
+          }
+        }
+      }
+    }
+    
+    // 5. Remover responsável
     console.log('🔄 Removendo responsável...');
     await pipefyService.removeAssigneeFromCard(cardId);
     
-    // 5. Mover para TO-DO
+    // 6. Limpar campos de responsável
+    console.log('🧹 Limpando campos de responsável...');
+    await pipefyService.clearResponsavelFields(cardId);
+    
+    // 7. Mover para TO-DO
     console.log('🔄 Movendo para TO-DO...');
     const movedCard = await pipefyService.moveCardToPhase(cardId, pipefyService.PHASES.TODO);
     
@@ -682,21 +774,28 @@ async function handleLiberar(interaction, cardId, username, userId, userMapper) 
       return interaction.editReply('❌ Erro ao mover task para "TO-DO".');
     }
     
-    // 6. Adicionar comentário
+    // 8. Adicionar comentário com tempo de responsabilidade
     await pipefyService.addComment(
       cardId, 
-      `🔄 Task liberada por ${username} via Discord. Agora está disponível para outros.`
+      `🔄 **Task liberada via Discord Bot**\n` +
+      `👤 **Ex-responsável:** ${exResponsavel}\n` +
+      `⏰ **Tempo de responsabilidade:** ${tempoResponsabilidade}\n` +
+      `📊 **Liberado por:** ${username}\n` +
+      `📅 **Liberado em:** ${new Date().toLocaleString('pt-BR')}\n` +
+      `📝 **Status:** Disponível para outros`
     );
     
-    // 7. Responder com embed
+    // 9. Responder com embed
     const embed = new EmbedBuilder()
       .setTitle('🔄 Task Liberada!')
       .setColor('#FF9900')
-      .setDescription(`Task voltou para a fila de disponíveis sem responsável.`)
+      .setDescription(`Task voltou para a fila de disponíveis`)
       .addFields(
         { name: '📝 Título', value: card.title, inline: true },
         { name: '🆔 Pipefy ID', value: cardId, inline: true },
         { name: '📊 Status', value: 'Disponível (TO-DO)', inline: true },
+        { name: '👤 Ex-responsável', value: exResponsavel, inline: true },
+        { name: '⏰ Tempo de responsabilidade', value: tempoResponsabilidade, inline: true },
         { name: '👤 Liberada por', value: username, inline: true }
       )
       .setFooter({ text: 'A task agora está disponível para outros desenvolvedores' })
@@ -892,6 +991,20 @@ const userMapperInstance = new UserMapper();
 // Limpar cache periodicamente
 setInterval(() => taskCacheInstance.clearExpired(), 60 * 60 * 1000);
 
+// ==================== EXPORTAR FUNÇÕES PARA OUTROS ARQUIVOS ====================
+
+export {
+  hasPermission,
+  handleListar,
+  handleConcluir,
+  handleAprovar,
+  handleLiberar,
+  handlePegar,
+  getTaskIdFromInput,
+  taskCacheInstance,
+  userMapperInstance
+};
+
 export default {
   data: new SlashCommandBuilder()
     .setName('task')
@@ -1048,7 +1161,7 @@ export default {
         case 'concluir':
           const concluirId = interaction.options.getString('id');
           const comentario = interaction.options.getString('comentario') || 'Desenvolvimento concluído via Discord Bot';
-          await handleConcluir(interaction, concluirId, comentario, username, userId, userMapperInstance);
+          await handleConcluir(interaction, concluirId, comentario, username, userId, userMapperInstance, taskCacheInstance);;
           break;
           
         case 'aprovar':

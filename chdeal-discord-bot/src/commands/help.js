@@ -57,8 +57,13 @@ async function showPrincipal(interaction) {
         name: '👨‍💼 **COMANDOS ADMIN/PM**',
         value: '```/task aprovar <id>``` - Aprovar task em revisão\n```/task atribuir <id> <@usuario>``` - Atribuir task\n```/task criar``` - Criar nova task',
         inline: false
-      }
-    )
+      },
+
+      { 
+        name: '📚 **DOCUMENTAÇÃO**',
+        value: '```/docs``` - Documentação completa do sistema\n```/docs secao:status``` - Status e métricas',
+        inline: false
+      })
     .setFooter({ 
       text: 'Digite /help categoria:<opção> para ver mais detalhes' 
     })

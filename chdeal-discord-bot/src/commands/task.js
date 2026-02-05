@@ -1,143 +1,194 @@
+// src/commands/task.js - VERSÃO COM IDS REAIS APENAS
 import { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import pipefyService from '../services/pipefyService.js';
+import { parsePtBrDateTime, formatTimeBetween } from '../utils/dateUtils.js';
 
-// ==================== SISTEMA DE CACHE ====================
-class TaskCache {
-  constructor(ttlMinutes = 5) {
-    this.cache = new Map();
-    this.ttl = ttlMinutes * 60 * 1000;
-  }
+// Utils
+import { UserMapper } from '../utils/UserMapper.js';
+import { checkCommandPermission } from '../utils/permissions.js';
+import { sanitizeText, sanitizeId, sanitizeComentario } from '../utils/sanitize.js';
+import { logger } from '../utils/logger.js';
+import { 
+  DEFAULT_TASK_LIMIT, 
+  MAX_TASKS_PER_LIST,
+  TASK_TIMEOUT_HOURS,
+  TASK_WARNING_HOURS,
+  MAX_TASKS_PER_USER
+} from '../config/constants.js';
 
-  set(key, data) {
-    this.cache.set(key, {
-      data,
-      expires: Date.now() + this.ttl
-    });
-  }
+// Inicializar instâncias globais
+const userMapperInstance = new UserMapper();
 
-  get(key) {
-    const item = this.cache.get(key);
-    if (!item || Date.now() > item.expires) {
-      this.cache.delete(key);
-      return null;
-    }
-    return item.data;
+// ==================== FUNÇÕES UTILITÁRIAS ====================
+function validateCardId(cardId) {
+  if (!cardId || typeof cardId !== 'string') {
+    throw new Error('ID da task não fornecido ou inválido');
   }
-
-  clearExpired() {
-    const now = Date.now();
-    for (const [key, value] of this.cache.entries()) {
-      if (now > value.expires) {
-        this.cache.delete(key);
-      }
-    }
+  
+  // Aceita apenas IDs numéricos longos do Pipefy (normalmente 8+ dígitos)
+  const cleanedId = cardId.trim();
+  
+  if (!/^[0-9]{8,}$/.test(cleanedId)) {
+    throw new Error('ID inválido. Use o ID completo do Pipefy (ex: 341883329).');
   }
-
-  size() {
-    return this.cache.size;
-  }
+  
+  return cleanedId;
 }
 
-// ==================== GERENCIADOR DE USUÁRIOS ====================
-class UserMapper {
-  constructor() {
-    this.mappings = new Map();
-    this.reverseMappings = new Map();
-    this.fullnameMappings = new Map();
-    this.loadMappings();
+function getCardDescription(card) {
+  if (!card.fields || !Array.isArray(card.fields)) {
+    return 'Sem descrição';
   }
+  
+  const descricaoField = card.fields.find(field => 
+    field.name && (
+      field.name.toLowerCase().includes('descrição') ||
+      field.name.toLowerCase().includes('descricao') ||
+      field.name.toLowerCase().includes('description') ||
+      field.name.toLowerCase().includes('detalhe') ||
+      field.name.toLowerCase().includes('observação') ||
+      field.name.toLowerCase().includes('obs')
+    )
+  );
+  
+  return sanitizeText(descricaoField?.value) || 'Sem descrição';
+}
 
-  loadMappings() {
-    try {
-      // Mapeamento de emails
-      if (process.env.USER_MAPPINGS) {
-        const parsed = JSON.parse(process.env.USER_MAPPINGS);
-        Object.entries(parsed).forEach(([discordId, email]) => {
-          this.mappings.set(discordId, email);
-          this.reverseMappings.set(email.toLowerCase(), discordId);
-        });
-        console.log(`✅ Mapeamento carregado: ${this.mappings.size} usuários`);
-      }
+// ==================== REGRAS DE NEGÓCIO ====================
+
+// 1. VALIDAÇÃO DE CAMPOS OBRIGATÓRIOS
+async function validateRequiredFields(cardId, requiredFields = []) {
+  try {
+    const card = await pipefyService.getCard(cardId);
+    
+    if (!card) return { valid: false, error: 'Card não encontrado' };
+    
+    const missingFields = [];
+    
+    for (const fieldName of requiredFields) {
+      const field = card.fields?.find(f => 
+        f.name && f.name.toLowerCase().includes(fieldName.toLowerCase())
+      );
       
-      // Mapeamento de nomes completos
-      if (process.env.FULLNAME_MAPPINGS) {
-        const parsed = JSON.parse(process.env.FULLNAME_MAPPINGS);
-        Object.entries(parsed).forEach(([discordId, fullname]) => {
-          this.fullnameMappings.set(discordId, fullname);
-        });
-        console.log(`✅ Nomes completos carregados: ${this.fullnameMappings.size} usuários`);
+      if (!field || !field.value || field.value.trim() === '') {
+        missingFields.push(fieldName);
       }
-    } catch (error) {
-      console.error('❌ Erro ao carregar mapeamento:', error);
     }
-  }
-
-  getEmail(discordIdOrUsername) {
-    return this.mappings.get(discordIdOrUsername);
-  }
-
-  getDiscordId(email) {
-    return this.reverseMappings.get(email?.toLowerCase());
-  }
-
-  // ✅ NOVO MÉTODO: Buscar nome completo
-  getFullname(discordIdOrUsername) {
-    return this.fullnameMappings.get(discordIdOrUsername);
-  }
-
-  addMapping(discordId, email) {
-    this.mappings.set(discordId, email);
-    this.reverseMappings.set(email.toLowerCase(), discordId);
-  }
-
-  getAll() {
-    return Object.fromEntries(this.mappings);
+    
+    if (missingFields.length > 0) {
+      return {
+        valid: false,
+        error: `Campos obrigatórios não preenchidos: ${missingFields.join(', ')}`,
+        missingFields
+      };
+    }
+    
+    return { valid: true, card };
+  } catch (error) {
+    logger.error('Erro na validação de campos', error);
+    return { valid: true }; // Se der erro, permite continuar
   }
 }
 
-// ==================== UTILITÁRIOS ====================
-async function getTaskIdFromInput(input, userId, filtro = 'todo', taskCache) {
-  // Se for apenas números (provavelmente um índice da listagem)
-  if (/^\d+$/.test(input)) {
-    const taskNumber = parseInt(input);
-    const cacheKey = `${userId}:${filtro}`;
-    const cachedData = taskCache.get(cacheKey);
+// 2. LIMITE DE TASKS POR USUÁRIO
+async function checkUserTaskLimit(userId, username, userMapper) {
+  if (!MAX_TASKS_PER_USER) return { allowed: true };
+  
+  const maxTasks = parseInt(MAX_TASKS_PER_USER);
+  if (isNaN(maxTasks) || maxTasks <= 0) return { allowed: true };
+  
+  const userEmail = userMapper.getEmail(userId) || userMapper.getEmail(username);
+  if (!userEmail) {
+    logger.warn('Usuário não mapeado, pulando verificação de limite', { userId, username });
+    return { allowed: true, reason: 'Usuário não mapeado' };
+  }
+  
+  try {
+    const tasksEmAndamento = await pipefyService.getCardsInPhase(
+      pipefyService.PHASES.EM_ANDAMENTO, 
+      100
+    );
     
-    if (!cachedData) {
-      return { error: 'Cache expirado. Use `/task listar` primeiro.' };
+    const userTasks = tasksEmAndamento.filter(task => 
+      task.assignees?.some(assignee => 
+        assignee.email && assignee.email.toLowerCase() === userEmail.toLowerCase()
+      )
+    );
+    
+    if (userTasks.length >= maxTasks) {
+      return {
+        allowed: false,
+        reason: `Você já tem ${userTasks.length}/${maxTasks} tasks em andamento. Conclua algumas antes de pegar novas.`,
+        currentCount: userTasks.length,
+        limit: maxTasks
+      };
     }
     
-    if (taskNumber < 1 || taskNumber > cachedData.length) {
-      return { error: `Número inválido. Escolha entre 1 e ${cachedData.length}.` };
-    }
-    
-    return { 
-      id: cachedData[taskNumber - 1].id, 
-      title: cachedData[taskNumber - 1].title 
+    return { allowed: true, currentCount: userTasks.length, limit: maxTasks };
+  } catch (error) {
+    logger.warn('Erro ao verificar limite de tasks', error);
+    return { allowed: true, error: error.message };
+  }
+}
+
+// 3. VERIFICAÇÃO DE PRAZOS
+function checkTaskDeadline(card) {
+  if (!card.createdAt) return { status: 'normal' };
+  
+  const horasTask = Math.floor((Date.now() - new Date(card.createdAt).getTime()) / (1000 * 60 * 60));
+  
+  if (horasTask > TASK_TIMEOUT_HOURS) {
+    return {
+      status: 'atrasada',
+      horas: horasTask,
+      limite: TASK_TIMEOUT_HOURS,
+      mensagem: `⏰ ATRASADA: ${horasTask}h (limite: ${TASK_TIMEOUT_HOURS}h)`
+    };
+  } else if (horasTask > TASK_WARNING_HOURS) {
+    return {
+      status: 'alerta',
+      horas: horasTask,
+      limite: TASK_WARNING_HOURS,
+      mensagem: `⚠️ ALERTA: ${horasTask}h (alerta: ${TASK_WARNING_HOURS}h)`
     };
   }
   
-  // Se for um ID longo do Pipefy (normalmente 10+ dígitos)
-  if (/^[0-9]{6,}$/.test(input)) {
-    return { id: input };
+  return { status: 'normal', horas: horasTask };
+}
+
+// 4. HISTÓRICO DE ALTERAÇÕES (simplificado)
+async function trackChange(cardId, action, performedBy, details = {}) {
+  try {
+    const timestamp = new Date().toISOString();
+    const logEntry = {
+      action,
+      performedBy,
+      timestamp,
+      details,
+      cardId
+    };
+    
+    // Aqui você poderia salvar em um banco de dados
+    // Por enquanto, apenas log
+    logger.info('Alteração registrada', logEntry);
+    
+    // Adicionar comentário no Pipefy para histórico
+    await pipefyService.addComment(cardId,
+      `📝 **Registro de Alteração**\n` +
+      `👤 **Por:** ${performedBy}\n` +
+      `🔄 **Ação:** ${action}\n` +
+      `⏰ **Em:** ${new Date(timestamp).toLocaleString('pt-BR')}\n` +
+      `${details.reason ? `📋 **Motivo:** ${details.reason}\n` : ''}`
+    );
+    
+    return true;
+  } catch (error) {
+    logger.error('Erro ao registrar alteração', error);
+    return false;
   }
-  
-  return { error: 'ID inválido. Use um número da listagem (ex: 1, 2, 3) ou o ID completo do Pipefy.' };
 }
 
-function hasPermission(interaction) {
-  const member = interaction.member;
-  const adminUsers = process.env.ADMIN_USERS 
-    ? process.env.ADMIN_USERS.split(',').map(u => u.trim().toLowerCase()) 
-    : [];
-  
-  const isAdmin = adminUsers.includes(interaction.user.username.toLowerCase());
-  const isPM = process.env.PM_ROLE_ID && member.roles.cache.has(process.env.PM_ROLE_ID);
-  
-  return isAdmin || isPM;
-}
-
-// ==================== FUNÇÕES DE COMANDOS ====================
+// ==================== HANDLERS DE COMANDOS ====================
 async function handleTest(interaction) {
   await interaction.deferReply({ ephemeral: true });
   
@@ -145,7 +196,7 @@ async function handleTest(interaction) {
     const connection = await pipefyService.testConnection();
     
     if (!connection.success) {
-      return interaction.editReply('❌ Falha na conexão com o Pipefy. Verifique o token.');
+      throw new Error('Falha na conexão com o Pipefy');
     }
     
     const embed = new EmbedBuilder()
@@ -173,56 +224,57 @@ async function handleTest(interaction) {
     await interaction.editReply({ embeds: [embed] });
     
   } catch (error) {
-    console.error('Erro no teste:', error);
-    await interaction.editReply('❌ Erro ao testar conexão com o Pipefy.');
+    logger.error('Erro no teste de conexão', error);
+    throw new Error('Erro ao testar conexão com o Pipefy');
   }
 }
 
-async function handleListar(interaction, filtro, limite, userId, taskCache) {
+async function handleListar(interaction, filtro, limite) {
   await interaction.deferReply();
   
   try {
+    const limit = Math.min(limite || DEFAULT_TASK_LIMIT, MAX_TASKS_PER_LIST);
+    
     let tasks = [];
     let titulo = '';
     let faseId = '';
     
     switch(filtro) {
       case 'todo':
-        tasks = await pipefyService.getCardsTodo(limite);
+        tasks = await pipefyService.getCardsTodo(limit);
         titulo = '📭 Tasks TO-DO (Disponíveis)';
         break;
       case 'andamento':
         faseId = pipefyService.PHASES.EM_ANDAMENTO;
-        tasks = await pipefyService.getCardsInPhase(faseId, limite);
+        tasks = await pipefyService.getCardsInPhase(faseId, limit);
         titulo = '🔄 Tasks Em Andamento';
         break;
       case 'revisao':
         faseId = pipefyService.PHASES.EM_REVISAO;
-        tasks = await pipefyService.getCardsInPhase(faseId, limite);
+        tasks = await pipefyService.getCardsInPhase(faseId, limit);
         titulo = '📋 Tasks em Revisão';
         break;
       case 'concluidas':
         faseId = pipefyService.PHASES.CONCLUIDO;
-        tasks = await pipefyService.getCardsInPhase(faseId, limite);
+        tasks = await pipefyService.getCardsInPhase(faseId, limit);
         titulo = '✅ Tasks Concluídas';
         break;
       case 'bloqueadas':
         faseId = pipefyService.PHASES.BLOCKED;
-        tasks = await pipefyService.getCardsInPhase(faseId, limite);
+        tasks = await pipefyService.getCardsInPhase(faseId, limit);
         titulo = '⛔ Tasks Bloqueadas';
         break;
       case 'backlog':
         faseId = pipefyService.PHASES.BACKLOG;
-        tasks = await pipefyService.getCardsInPhase(faseId, limite);
+        tasks = await pipefyService.getCardsInPhase(faseId, limit);
         titulo = '📦 Tasks em Backlog';
         break;
     }
     
     if (!tasks || tasks.length === 0) {
-      return interaction.editReply(`📭 Nenhuma task encontrada no filtro: ${titulo}`);
+      await interaction.editReply(`📭 Nenhuma task encontrada no filtro: ${titulo}`);
+      return;
     }
-
-    taskCache.set(`${userId}:${filtro}`, tasks.map(task => ({ id: task.id, title: task.title })));
 
     const embed = new EmbedBuilder()
       .setTitle(titulo)
@@ -232,7 +284,6 @@ async function handleListar(interaction, filtro, limite, userId, taskCache) {
 
     const rows = [];
     let currentRow = new ActionRowBuilder();
-    let buttonCount = 0;
 
     tasks.forEach((task, index) => {
       const responsaveis = task.assignees?.map(a => a.name).join(', ') || 'Ninguém';
@@ -246,21 +297,21 @@ async function handleListar(interaction, filtro, limite, userId, taskCache) {
         inline: false
       });
 
-      // Criar botão para copiar ID
-      if (buttonCount < 25) { // Limite do Discord
-        const shortId = task.id.slice(-6); // Últimos 6 dígitos para mostrar
-        const button = new ButtonBuilder()
+      // Criar botões (agora sem números, usando apenas ID)
+      if (index < 5) { // Limitar a 5 botões para não poluir
+        // Botão para copiar ID
+        const copyButton = new ButtonBuilder()
           .setCustomId(`copy_id_${task.id}`)
-          .setLabel(`📋 ${numero}`)
+          .setLabel(`📋 ID ${numero}`)
           .setStyle(ButtonStyle.Secondary);
         
-        currentRow.addComponents(button);
-        buttonCount++;
+        // Botão para ver descrição
+        const descButton = new ButtonBuilder()
+          .setCustomId(`show_desc_${task.id}`)
+          .setLabel(`🔍 Detalhes ${numero}`)
+          .setStyle(ButtonStyle.Primary)
         
-        if (buttonCount % 5 === 0) {
-          rows.push(currentRow);
-          currentRow = new ActionRowBuilder();
-        }
+        currentRow.addComponents(copyButton, descButton);
       }
     });
 
@@ -269,12 +320,10 @@ async function handleListar(interaction, filtro, limite, userId, taskCache) {
     }
 
     embed.setFooter({ 
-      text: `Use /task pegar id:<Número ou ID> ou clique em 📋 para copiar o ID. IDs válidos por 5 minutos.` 
+      text: `📋 Copiar ID | 🔍 Ver detalhes\nUse o ID completo da task (ex: /task pegar id:341883329)` 
     });
 
     const responseOptions = { embeds: [embed] };
-    
-    // Adicionar botões de copiar ID
     if (rows.length > 0) {
       responseOptions.components = rows;
     }
@@ -282,39 +331,53 @@ async function handleListar(interaction, filtro, limite, userId, taskCache) {
     await interaction.editReply(responseOptions);
     
   } catch (error) {
-    console.error('Erro ao listar tasks:', error);
-    await interaction.editReply('❌ Erro ao listar tasks.');
+    logger.error('Erro ao listar tasks', error);
+    throw new Error('Erro ao listar tasks');
   }
 }
 
-async function handleInfo(interaction, cardId) {
+async function handleInfo(interaction, rawCardId) {
   await interaction.deferReply();
   
   try {
+    const cardId = validateCardId(rawCardId);
     const card = await pipefyService.getCard(cardId);
     
     if (!card) {
-      return interaction.editReply('❌ Task não encontrada no Pipefy.');
+      throw new Error(`Task ${cardId} não encontrada no Pipefy`);
     }
+    
+    const descricao = getCardDescription(card);
+    const deadlineInfo = checkTaskDeadline(card);
     
     const embed = new EmbedBuilder()
       .setTitle(`📄 ${card.title}`)
-      .setColor('#FF9900')
+      .setColor(deadlineInfo.status === 'atrasada' ? '#FF0000' : 
+                deadlineInfo.status === 'alerta' ? '#FF9900' : '#FF9900')
       .setDescription(`Detalhes da task no Pipefy`)
       .addFields(
-        { name: '🆔 ID', value: card.id, inline: true },
+        { name: '🆔 ID', value: `\`${card.id}\``, inline: true },
         { name: '📊 Fase', value: card.current_phase?.name || 'N/A', inline: true },
         { name: '👤 Criado por', value: card.createdBy?.name || 'Desconhecido', inline: true },
         { name: '👥 Responsáveis', value: card.assignees?.map(a => a.name).join(', ') || 'Ninguém', inline: true },
-        { name: '📅 Criado em', value: new Date(card.createdAt).toLocaleString('pt-BR'), inline: true }
+        { name: '📅 Criado em', value: new Date(card.createdAt).toLocaleString('pt-BR'), inline: true },
+        { name: '⏰ Tempo decorrido', value: `${deadlineInfo.horas || 0}h ${deadlineInfo.mensagem || ''}`, inline: true }
       )
       .setTimestamp();
+    
+    if (descricao && descricao !== 'Sem descrição') {
+      embed.addFields({ 
+        name: '📋 Descrição', 
+        value: descricao, 
+        inline: false 
+      });
+    }
     
     await interaction.editReply({ embeds: [embed] });
     
   } catch (error) {
-    console.error('Erro ao buscar info:', error);
-    await interaction.editReply('❌ Erro ao buscar informações da task.');
+    logger.error('Erro ao buscar info da task', error);
+    throw new Error(`Erro ao buscar informações: ${error.message}`);
   }
 }
 
@@ -334,7 +397,7 @@ async function handleDashboard() {
         const tasks = await pipefyService.getCardsInPhase(id, 20);
         return { key, tasks: tasks || [] };
       } catch (error) {
-        console.error(`Erro ao buscar fase ${key}:`, error.message);
+        logger.warn(`Erro ao buscar fase ${key}`, error);
         return { key, tasks: [] };
       }
     })
@@ -364,6 +427,15 @@ async function handleDashboard() {
     });
   });
   
+  // Calcular tasks atrasadas
+  let tasksAtrasadas = 0;
+  emAndamentoTasks.forEach(task => {
+    if (task.createdAt) {
+      const horasTask = Math.floor((Date.now() - new Date(task.createdAt).getTime()) / (1000 * 60 * 60));
+      if (horasTask > TASK_TIMEOUT_HOURS) tasksAtrasadas++;
+    }
+  });
+  
   const embed = new EmbedBuilder()
     .setTitle('📊 Dashboard de Tasks')
     .setColor('#7289DA')
@@ -373,6 +445,7 @@ async function handleDashboard() {
       { name: '📦 Backlog', value: `${backlogTasks.length}`, inline: true },
       { name: '📭 Disponível (TO-DO)', value: `${todoTasks.length}`, inline: true },
       { name: '🔄 Em Andamento', value: `${emAndamentoTasks.length}`, inline: true },
+      { name: '⏰ Atrasadas', value: `${tasksAtrasadas}`, inline: true },
       { name: '📋 Em Revisão', value: `${revisaoTasks.length}`, inline: true },
       { name: '✅ Concluídas', value: `${concluidoTasks.length}`, inline: true },
       { name: '⛔ Bloqueadas', value: `${bloqueadoTasks.length}`, inline: true },
@@ -383,33 +456,30 @@ async function handleDashboard() {
   return embed;
 }
 
-async function handlePegar(interaction, cardId, username, userId, userMapper, taskCache) {
+async function handlePegar(interaction, rawCardId) {
   await interaction.deferReply();
   
-  // Se for um número, buscar do cache
-  if (/^\d+$/.test(cardId)) {
-    const taskNumber = parseInt(cardId);
-    const cachedData = taskCache.get(`${userId}:todo`);
-    
-    if (!cachedData) {
-      return interaction.editReply('❌ Cache expirado ou não encontrado. Use `/task listar` primeiro.');
-    }
-    
-    if (taskNumber < 1 || taskNumber > cachedData.length) {
-      return interaction.editReply(`❌ Número inválido. Escolha entre 1 e ${cachedData.length}.`);
-    }
-    
-    cardId = cachedData[taskNumber - 1].id;
-  }
-  
   try {
-    const userEmail = userMapper.getEmail(userId) || userMapper.getEmail(username);
-    console.log(`📧 Email do usuário: ${userEmail}`);
+    const username = interaction.user.username;
+    const userId = interaction.user.id;
     
+    // Validar ID
+    const cardId = validateCardId(rawCardId);
+    
+    const userEmail = userMapperInstance.getEmail(userId) || userMapperInstance.getEmail(username);
+    logger.info(`Usuário pegando task`, { userId, username, cardId, userEmail });
+
+    // Verificar limite de tasks
+    const limitCheck = await checkUserTaskLimit(userId, username, userMapperInstance);
+    if (!limitCheck.allowed) {
+      throw new Error(limitCheck.reason);
+    }
+    
+    // Verificar disponibilidade
     const disponibilidade = await pipefyService.isCardAvailableInTodo(cardId, userEmail);
     
     if (!disponibilidade.available) {
-      return interaction.editReply(`❌ Task não disponível: ${disponibilidade.reason}`);
+      throw new Error(`Task não disponível: ${disponibilidade.reason}`);
     }
     
     if (disponibilidade.warning) {
@@ -425,85 +495,99 @@ async function handlePegar(interaction, cardId, username, userId, userMapper, ta
         .setFooter({ text: 'Use /task concluir quando finalizar' })
         .setTimestamp();
       
-      return interaction.editReply({ embeds: [embed] });
+      await interaction.editReply({ embeds: [embed] });
+      return;
     }
     
     const card = disponibilidade.card;
     
+    // REGRA: Validar campos obrigatórios antes de pegar
+    const validation = await validateRequiredFields(cardId, ['descrição', 'complexidade']);
+    if (!validation.valid && process.env.REQUIRE_FIELDS === 'true') {
+      throw new Error(`Task não pode ser pega: ${validation.error}`);
+    }
+    
     // Mover para Em Andamento
-    console.log(`🔄 Movendo task ${cardId} para Em Andamento...`);
+    logger.info(`Movendo task para Em Andamento`, { cardId });
     const movedCard = await pipefyService.moveToEmAndamento(cardId);
     
     if (!movedCard) {
-      return interaction.editReply('❌ Erro ao mover task para "Em Andamento".');
+      throw new Error('Erro ao mover task para "Em Andamento"');
     }
     
-    // 1. Tentar atribuir o usuário no Pipefy
+    // Registrar alteração
+    await trackChange(cardId, 'PEGAR_TASK', username, {
+      previousPhase: 'TO-DO',
+      newPhase: 'Em Andamento'
+    });
+    
+    // Obter nome completo
+    let responsavelNome = username;
+    const fullname = userMapperInstance.getFullname(userId) || userMapperInstance.getFullname(username);
+    if (fullname) {
+      responsavelNome = fullname;
+    }
+    
+    // Atualizar campos no Pipefy
+    const fieldsToUpdate = {};
+    if (process.env.PIPEFY_FIELD_RESPONSAVEL_ID) {
+      fieldsToUpdate[process.env.PIPEFY_FIELD_RESPONSAVEL_ID] = responsavelNome;
+    }
+    if (userEmail && process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID) {
+      fieldsToUpdate[process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID] = userEmail;
+    }
+    
+    if (Object.keys(fieldsToUpdate).length > 0) {
+      await pipefyService.updateCardFields(cardId, fieldsToUpdate);
+    }
+    
+    // Tentar atribuir usuário
     if (userEmail) {
       try {
-        console.log(`🔗 Atribuindo ${username} (${userEmail}) à task...`);
         await pipefyService.assignUserToCard(cardId, username, userEmail);
-      } catch (assignError) {
-        console.error('❌ Erro ao atribuir usuário:', assignError);
+      } catch (error) {
+        logger.warn('Erro ao atribuir usuário no Pipefy', error);
       }
-    } else {
-      console.log(`⚠️ Usuário ${username} não está mapeado.`);
     }
     
-    // 2. Preencher os campos "Responsável" e "Email do Responsável"
-// 2. Preencher os campos "Responsável" e "Email do Responsável"
-console.log(`📝 Preenchendo campos de responsável...`);
+    // Adicionar comentário
+    const timestamp = new Date().toISOString(); // Formato padrão ISO
+    const timestampLegivel = new Date().toLocaleString('pt-BR');
 
-// Obter nome completo
-let responsavelNome = username; // valor padrão (username do Discord)
-
-// Tentar obter nome completo do mapeamento
-if (userMapper && userMapper.getFullname) {
-  const fullname = userMapper.getFullname(userId) || userMapper.getFullname(username);
-  if (fullname) {
-    responsavelNome = fullname;
-    console.log(`✅ Nome completo encontrado: ${fullname}`);
-  } else {
-    console.log(`ℹ️  Nome completo não mapeado para ${username}`);
-    console.log(`   Adicione ao .env: FULLNAME_MAPPINGS={"${username}": "Seu Nome Completo"}`);
-  }
-} else {
-  console.log(`ℹ️  UserMapper não tem método getFullname`);
-}
-
-const fieldsToUpdate = {
-  [process.env.PIPEFY_FIELD_RESPONSAVEL_ID]: responsavelNome
-};
-
-if (userEmail) {
-  fieldsToUpdate[process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID] = userEmail;
-}
-
-const fieldUpdates = await pipefyService.updateCardFields(cardId, fieldsToUpdate);
-    
-    // 3. Adicionar comentário com timestamp de início
-    const timestamp = new Date().toLocaleString('pt-BR');
     await pipefyService.addComment(cardId, 
       `🎯 **Task atribuída via Discord Bot**\n` +
       `👤 **Responsável:** ${responsavelNome}${userEmail ? ` (${userEmail})` : ''}\n` +
       `⏰ **Iniciado em:** ${timestamp}\n` +
-      `📊 **Status:** Em Andamento`
+      `📊 **Status:** Em Andamento\n` +
+      `⏳ **Prazo:** ${TASK_TIMEOUT_HOURS} horas\n` +
+      `📅 **Timestamp ISO:** ${timestamp}`
     );
     
-const embed = new EmbedBuilder()
-  .setTitle('✅ Task Atribuída!')
-  .setColor('#00FF00')
-  .setDescription(`Você agora é responsável por esta task`)
-  .addFields(
-    { name: '📝 Título', value: card.title, inline: true },
-    { name: '🆔 Pipefy ID', value: cardId, inline: true },
-    { name: '📊 Status', value: 'Em Andamento', inline: true },
-    { name: '👤 Responsável', value: responsavelNome, inline: true },  // ← CORRIGIDO!
-    { name: '⏰ Prazo', value: `${process.env.TASK_TIMEOUT_HOURS || 48}h`, inline: true },
-    { name: '📅 Iniciado em', value: timestamp, inline: true }
-  )
-  .setFooter({ text: 'Use /task concluir id:<ID> quando finalizar o desenvolvimento' })
-  .setTimestamp();
+    // Criar resposta
+    const descricao = getCardDescription(card);
+    
+    const embed = new EmbedBuilder()
+      .setTitle('✅ Task Atribuída!')
+      .setColor('#00FF00')
+      .setDescription(`Você agora é responsável por esta task`)
+      .addFields(
+        { name: '📝 Título', value: card.title, inline: true },
+        { name: '🆔 Pipefy ID', value: `\`${cardId}\``, inline: true },
+        { name: '📊 Status', value: '🔄 Em Andamento', inline: true },
+        { name: '👤 Responsável', value: responsavelNome, inline: true },
+        { name: '⏰ Prazo', value: `${TASK_TIMEOUT_HOURS}h`, inline: true },
+        { name: '📅 Iniciado em', value: timestamp, inline: true }
+      )
+      .setFooter({ text: 'Use /task concluir id:<ID> quando finalizar o desenvolvimento' })
+      .setTimestamp();
+    
+    if (descricao && descricao !== 'Sem descrição') {
+      embed.addFields({ 
+        name: '📋 Descrição', 
+        value: descricao.length > 500 ? descricao.substring(0, 500) + '...' : descricao, 
+        inline: false 
+      });
+    }
     
     if (userEmail) {
       embed.addFields({ 
@@ -514,7 +598,7 @@ const embed = new EmbedBuilder()
     } else {
       embed.addFields({ 
         name: '⚠️ Aviso', 
-        value: `Usuário não mapeado. Adicione ao USER_MAPPINGS:\n\`${userId}\`: "seu_email@exemplo.com"`, 
+        value: 'Usuário não mapeado. Solicite a um admin para configurar seu email.', 
         inline: false 
       });
     }
@@ -522,133 +606,163 @@ const embed = new EmbedBuilder()
     await interaction.editReply({ embeds: [embed] });
     
   } catch (error) {
-    console.error('Erro ao pegar task:', error);
-    await interaction.editReply('❌ Erro ao atribuir task. Verifique se o ID está correto.');
+    logger.error('Erro ao pegar task', error);
+    throw error;
   }
 }
 
-async function handleConcluir(interaction, cardId, comentario, username, userId, userMapper, taskCache) {
+async function handleConcluir(interaction, rawCardId, rawComentario) {
   await interaction.deferReply();
   
   try {
-    console.log(`🔍 Buscando card ${cardId} para concluir...`);
+    const username = interaction.user.username;
+    const userId = interaction.user.id;
     
-    // Primeiro, tentar buscar a task
-    const card = await pipefyService.getCard(cardId);
+    // Validar ID
+    const cardId = validateCardId(rawCardId);
     
-    if (!card) {
-      // Talvez seja um número da listagem
-      if (/^\d+$/.test(cardId)) {
-        const taskNumber = parseInt(cardId);
-        const cachedData = taskCacheInstance.get(`${userId}:todo`);
-        
-        if (cachedData && taskNumber >= 1 && taskNumber <= cachedData.length) {
-          cardId = cachedData[taskNumber - 1].id;
-          // Tentar buscar novamente com o ID real
-          const newCard = await pipefyService.getCard(cardId);
-          if (!newCard) {
-            return interaction.editReply('❌ Task não encontrada no Pipefy. Use o ID completo da task.');
-          }
-          return await processConcluir(interaction, cardId, comentario, username, userId, userMapper, newCard);
-        }
-      }
-      return interaction.editReply('❌ Task não encontrada no Pipefy. Use o ID completo da task.');
+    // Validar comentário
+    if (!rawComentario || rawComentario.trim().length < 5) {
+      throw new Error('Comentário obrigatório! Descreva o que foi feito (mínimo 5 caracteres).');
     }
     
-    return await processConcluir(interaction, cardId, comentario, username, userId, userMapper, card);
+    const comentarioSanitizado = sanitizeComentario(rawComentario);
     
-  } catch (error) {
-    console.error('Erro ao concluir task:', error);
-    await interaction.editReply(`❌ Erro ao marcar task como concluída: ${error.message}`);
-  }
-}
-
-async function processConcluir(interaction, cardId, comentario, username, userId, userMapper, card) {
-  console.log(`📊 Fase atual da task: ${card.current_phase?.name}`);
-  
-  if (card.current_phase?.id !== pipefyService.PHASES.EM_ANDAMENTO) {
-    return interaction.editReply(
-      `⚠️ Esta task não está em andamento. Está na fase: ${card.current_phase?.name || 'Desconhecida'}`
-    );
-  }
-  
-  // Verificar se o usuário que está tentando concluir é o responsável
-  const userEmail = userMapper.getEmail(userId) || userMapper.getEmail(username);
-  console.log(`📧 Email do usuário para verificação: ${userEmail}`);
-  
-  const assigneeCheck = await pipefyService.isUserCardAssignee(cardId, userEmail);
-  console.log(`✅ É assignee? ${assigneeCheck.isAssignee}`);
-  
-  // Se não é assignee mas tem permissão de admin/PM, permitir
-  if (!assigneeCheck.isAssignee && !hasPermission(interaction)) {
-    const currentAssignees = assigneeCheck.assignees.map(a => a.name).join(', ') || 'Ninguém';
-    return interaction.editReply(`❌ Você não é o responsável por esta task. Responsável atual: ${currentAssignees}`);
-  }
-  
-  // Mover para Revisão
-  console.log(`🔄 Movendo task ${cardId} para Revisão...`);
-  const movedCard = await pipefyService.moveToRevisao(cardId);
-  
-  if (!movedCard) {
-    return interaction.editReply('❌ Erro ao mover task para "Revisão".');
-  }
-  
-  // Adicionar comentário
-  await pipefyService.addComment(cardId, 
-    `📋 Desenvolvimento concluído - Aguardando revisão\nComentário: ${comentario}\nConcluído por: ${username}`
-  );
-  
-  const tempoDecorrido = ((Date.now() - new Date(card.createdAt).getTime()) / (1000 * 60 * 60)).toFixed(2);
-  
-  const embed = new EmbedBuilder()
-    .setTitle('📋 Task em Revisão!')
-    .setColor('#FFA500')
-    .setDescription(`Task movida para fase de Revisão`)
-    .addFields(
-      { name: '📝 Título', value: card.title, inline: true },
-      { name: '🆔 Pipefy ID', value: cardId, inline: true },
-      { name: '👤 Desenvolvedor', value: username, inline: true },
-      { name: '⏰ Tempo de desenvolvimento', value: `${tempoDecorrido}h`, inline: true },
-      { name: '📊 Status', value: '📋 Em Revisão', inline: true },
-      { name: '💬 Comentário', value: comentario.substring(0, 100), inline: false }
-    )
-    .setFooter({ text: 'Aguardando aprovação via /task aprovar' })
-    .setTimestamp();
-  
-  await interaction.editReply({ embeds: [embed] });
-}
-
-async function handleAprovar(interaction, cardId, comentario, username) {
-  await interaction.deferReply();
-  
-  if (!hasPermission(interaction)) {
-    return interaction.editReply('❌ Você não tem permissão para aprovar tasks.');
-  }
-  
-  try {
+    logger.info(`Concluindo task`, { userId, username, cardId });
+    
+    // Buscar card
     const card = await pipefyService.getCard(cardId);
     
     if (!card) {
-      return interaction.editReply('❌ Task não encontrada no Pipefy.');
+      throw new Error(`Task ${cardId} não encontrada no Pipefy`);
+    }
+    
+    // Verificar fase
+    if (card.current_phase?.id !== pipefyService.PHASES.EM_ANDAMENTO) {
+      throw new Error(`Esta task não está em andamento. Está na fase: ${card.current_phase?.name || 'Desconhecida'}`);
+    }
+    
+    // Verificar permissão
+    const userEmail = userMapperInstance.getEmail(userId) || userMapperInstance.getEmail(username);
+    const assigneeCheck = await pipefyService.isUserCardAssignee(cardId, userEmail);
+    
+    if (!assigneeCheck.isAssignee) {
+      try {
+        checkCommandPermission(interaction, 'concluir');
+      } catch {
+        const currentAssignees = assigneeCheck.assignees.map(a => a.name).join(', ') || 'Ninguém';
+        throw new Error(`Você não é o responsável por esta task. Responsável atual: ${currentAssignees}`);
+      }
+    }
+    
+    // Mover para Revisão
+    const movedCard = await pipefyService.moveToRevisao(cardId);
+    
+    if (!movedCard) {
+      throw new Error('Erro ao mover task para "Revisão"');
+    }
+    
+    // Registrar alteração
+    await trackChange(cardId, 'CONCLUIR_TASK', username, {
+      previousPhase: 'Em Andamento',
+      newPhase: 'Em Revisão',
+      comentario: comentarioSanitizado
+    });
+    
+    // Adicionar comentário
+    await pipefyService.addComment(cardId, 
+      `📋 **Desenvolvimento concluído - Aguardando revisão**\n` +
+      `📝 **Comentário:** ${comentarioSanitizado}\n` +
+      `👨‍💻 **Concluído por:** ${username}\n` +
+      `📊 **Status:** Em Revisão`
+    );
+    
+    // Calcular tempo
+    const tempoDecorrido = ((Date.now() - new Date(card.createdAt).getTime()) / (1000 * 60 * 60)).toFixed(2);
+    const deadlineInfo = checkTaskDeadline(card);
+    
+    const embed = new EmbedBuilder()
+      .setTitle('📋 Task em Revisão!')
+      .setColor('#FFA500')
+      .setDescription(`Task movida para fase de Revisão`)
+      .addFields(
+        { name: '📝 Título', value: card.title, inline: true },
+        { name: '🆔 Pipefy ID', value: `\`${cardId}\``, inline: true },
+        { name: '👤 Desenvolvedor', value: username, inline: true },
+        { name: '⏰ Tempo de desenvolvimento', value: `${tempoDecorrido}h ${deadlineInfo.mensagem ? `(${deadlineInfo.mensagem})` : ''}`, inline: true },
+        { name: '📊 Status', value: '📋 Em Revisão', inline: true },
+        { name: '💬 Comentário', value: comentarioSanitizado.substring(0, 200), inline: false }
+      )
+      .setFooter({ text: 'Aguardando aprovação via /task aprovar' })
+      .setTimestamp();
+    
+    await interaction.editReply({ embeds: [embed] });
+    
+  } catch (error) {
+    logger.error('Erro ao concluir task', error);
+    throw error;
+  }
+}
+
+async function handleAprovar(interaction, rawCardId, rawComentario) {
+  await interaction.deferReply();
+  
+  try {
+    // Verificar permissão
+    checkCommandPermission(interaction, 'aprovar');
+    
+    const username = interaction.user.username;
+    
+    // Validar ID
+    const cardId = validateCardId(rawCardId);
+    
+    // Validar comentário
+    if (!rawComentario || rawComentario.trim().length < 3) {
+      throw new Error('Comentário obrigatório! Informe o feedback da revisão.');
+    }
+    
+    const comentarioSanitizado = sanitizeComentario(rawComentario);
+    
+    logger.info(`Aprovando task`, { userId: interaction.user.id, username, cardId });
+    
+    const card = await pipefyService.getCard(cardId);
+    
+    if (!card) {
+      throw new Error(`Task ${cardId} não encontrada no Pipefy`);
     }
     
     if (card.current_phase?.id !== pipefyService.PHASES.EM_REVISAO) {
-      return interaction.editReply(
-        `⚠️ Esta task não está em revisão. Está na fase: ${card.current_phase?.name || 'Desconhecida'}`
-      );
+      throw new Error(`Esta task não está em revisão. Está na fase: ${card.current_phase?.name || 'Desconhecida'}`);
+    }
+    
+    // REGRA: Validar se todos os campos obrigatórios estão preenchidos
+    const validation = await validateRequiredFields(cardId, ['descrição', 'complexidade', 'qualidade']);
+    if (!validation.valid && process.env.REQUIRE_APPROVAL_FIELDS === 'true') {
+      throw new Error(`Task não pode ser aprovada: ${validation.error}`);
     }
     
     const movedCard = await pipefyService.moveToConcluido(cardId);
     
     if (!movedCard) {
-      return interaction.editReply('❌ Erro ao aprovar task.');
+      throw new Error('Erro ao aprovar task');
     }
     
+    // Registrar alteração
+    await trackChange(cardId, 'APROVAR_TASK', username, {
+      previousPhase: 'Em Revisão',
+      newPhase: 'Concluído',
+      comentario: comentarioSanitizado
+    });
+    
     await pipefyService.addComment(cardId, 
-      `✅ Task aprovada!\nComentário: ${comentario}\nAprovado por: ${username}`
+      `✅ **Task aprovada!**\n` +
+      `📝 **Comentário:** ${comentarioSanitizado}\n` +
+      `👑 **Aprovado por:** ${username}\n` +
+      `🎉 **Status:** Concluída`
     );
     
     const tempoTotal = ((Date.now() - new Date(card.createdAt).getTime()) / (1000 * 60 * 60)).toFixed(2);
+    const deadlineInfo = checkTaskDeadline(card);
     
     const embed = new EmbedBuilder()
       .setTitle('✅ Task Aprovada!')
@@ -656,125 +770,141 @@ async function handleAprovar(interaction, cardId, comentario, username) {
       .setDescription(`Task aprovada e movida para Concluída`)
       .addFields(
         { name: '📝 Título', value: card.title, inline: true },
-        { name: '🆔 Pipefy ID', value: cardId, inline: true },
+        { name: '🆔 Pipefy ID', value: `\`${cardId}\``, inline: true },
         { name: '👤 Aprovado por', value: username, inline: true },
         { name: '👤 Desenvolvedor', value: card.assignees?.map(a => a.name).join(', ') || username, inline: true },
-        { name: '⏰ Tempo total', value: `${tempoTotal}h`, inline: true },
-        { name: '💬 Comentário', value: comentario.substring(0, 100), inline: false }
+        { name: '⏰ Tempo total', value: `${tempoTotal}h ${deadlineInfo.mensagem ? `(${deadlineInfo.mensagem})` : ''}`, inline: true },
+        { name: '📊 Status', value: '✅ Concluída', inline: true },
+        { name: '💬 Comentário', value: comentarioSanitizado.substring(0, 200), inline: false }
       )
       .setTimestamp();
     
     await interaction.editReply({ embeds: [embed] });
     
   } catch (error) {
-    console.error('Erro ao aprovar task:', error);
-    await interaction.editReply('❌ Erro ao aprovar task.');
+    logger.error('Erro ao aprovar task', error);
+    throw error;
   }
 }
 
-async function handleLiberar(interaction, cardId, username, userId, userMapper) {
+async function handleLiberar(interaction, rawCardId) {
   await interaction.deferReply();
   
   try {
-    // Primeiro, verificar se é um número da listagem
-    if (/^\d+$/.test(cardId)) {
-      // É um número, buscar no cache
-      const cacheKey = `${userId}:todo`;
-      const cachedData = taskCacheInstance.get(cacheKey);
-      
-      if (!cachedData) {
-        return interaction.editReply('❌ Cache expirado. Use `/task listar` primeiro para ver as tasks disponíveis.');
-      }
-      
-      const taskNumber = parseInt(cardId);
-      if (taskNumber < 1 || taskNumber > cachedData.length) {
-        return interaction.editReply(`❌ Número inválido. Escolha entre 1 e ${cachedData.length}.`);
-      }
-      
-      cardId = cachedData[taskNumber - 1].id;
-    }
+    const username = interaction.user.username;
+    const userId = interaction.user.id;
     
-    // Agora cardId deve ser o ID real
-    console.log(`🔍 Buscando card ${cardId} para liberar...`);
+    // Validar ID
+    const cardId = validateCardId(rawCardId);
     
-    // 1. Buscar a task atual
+    logger.info(`Liberando task`, { userId, username, cardId });
+    
     const card = await pipefyService.getCard(cardId);
     
     if (!card) {
-      return interaction.editReply('❌ Task não encontrada no Pipefy.');
+      throw new Error(`Task ${cardId} não encontrada no Pipefy`);
     }
     
-    console.log(`📊 Fase atual: ${card.current_phase?.name}`);
-    
-    // 2. Verificar se está em andamento
     if (card.current_phase?.id !== pipefyService.PHASES.EM_ANDAMENTO) {
-      return interaction.editReply(
-        `⚠️ Esta task não está em andamento. Está na fase: ${card.current_phase?.name || 'Desconhecida'}`
-      );
+      throw new Error(`Esta task não está em andamento. Está na fase: ${card.current_phase?.name || 'Desconhecida'}`);
     }
     
-    // 3. Verificar se o usuário é o responsável ou tem permissão
-    const userEmail = userMapper.getEmail(userId) || userMapper.getEmail(username);
+    // Verificar permissão
+    const userEmail = userMapperInstance.getEmail(userId) || userMapperInstance.getEmail(username);
     const isAssignee = userEmail && card.assignees?.some(a => a.email === userEmail);
     
-    if (!isAssignee && !hasPermission(interaction)) {
-      const currentAssignee = card.assignees?.[0]?.name || 'Ninguém';
-      return interaction.editReply(
-        `❌ Você não tem permissão para liberar esta task. Apenas o responsável atual (${currentAssignee}) ou Admin/PM podem liberar.`
-      );
+    if (!isAssignee) {
+      checkCommandPermission(interaction, 'liberar');
     }
     
-    // 4. Buscar comentários para encontrar quando foi atribuída
-    const comments = await pipefyService.getCardComments(cardId);
+    // Buscar tempo de responsabilidade - VERSÃO CORRIGIDA
     let tempoResponsabilidade = "Não foi possível calcular";
     let exResponsavel = username;
     
-    // Procurar pelo comentário de atribuição
-    const commentAttribution = comments.find(comment => 
-      comment.text && comment.text.includes('🎯 **Task atribuída via Discord Bot**')
-    );
-    
-    if (commentAttribution) {
-      // Extrair informações do comentário
-      const lines = commentAttribution.text.split('\n');
-      const responsavelLine = lines.find(line => line.includes('👤 **Responsável:**'));
-      const inicioLine = lines.find(line => line.includes('⏰ **Iniciado em:**'));
+    try {
+      const comments = await pipefyService.getCardComments(cardId);
+      const commentAttribution = comments.find(comment => 
+        comment.text && comment.text.includes('🎯 **Task atribuída via Discord Bot**')
+      );
       
-      if (responsavelLine) {
-        const match = responsavelLine.match(/👤 \*\*Responsável:\*\* (.+?)(?: \(|$)/);
-        if (match) exResponsavel = match[1];
-      }
-      
-      if (inicioLine) {
-        const match = inicioLine.match(/⏰ \*\*Iniciado em:\*\* (.+)/);
-        if (match) {
-          const dataInicio = new Date(match[1]);
-          const dataFim = new Date();
-          
-          if (!isNaN(dataInicio.getTime())) {
-            tempoResponsabilidade = pipefyService.calculateTimeBetween(dataInicio, dataFim);
+if (commentAttribution) {
+  console.log('📝 Comentário encontrado:', commentAttribution.text);
+  const lines = commentAttribution.text.split('\n');
+  console.log('📋 Linhas do comentário:', lines);
+  
+  const responsavelLine = lines.find(line => line.includes('👤 **Responsável:**'));
+  const inicioLine = lines.find(line => line.includes('⏰ **Iniciado em:**'));
+  const timestampLine = lines.find(line => line.includes('📅 **Timestamp ISO:**'));
+  
+  console.log('🕐 Linha de início:', inicioLine);
+  console.log('📅 Linha de timestamp:', timestampLine);
+  
+  if (responsavelLine) {
+    const match = responsavelLine.match(/👤 \*\*Responsável:\*\* (.+?)(?: \(|$)/);
+    if (match) exResponsavel = match[1];
+  }
+        
+        if (inicioLine) {
+          const match = inicioLine.match(/⏰ \*\*Iniciado em:\*\* (.+)/);
+          if (match) {
+            const dataString = match[1].trim();
+            let dataInicio = parsePtBrDateTime(dataString);
+            
+            // Se não conseguiu parsear, tenta buscar timestamp ISO
+            if (isNaN(dataInicio.getTime())) {
+              const timestampLine = lines.find(line => line.includes('📅 **Timestamp ISO:**'));
+              if (timestampLine) {
+                const timestampMatch = timestampLine.match(/📅 \*\*Timestamp ISO:\*\* (.+)/);
+                if (timestampMatch) {
+                  dataInicio = new Date(timestampMatch[1].trim());
+                }
+              }
+            }
+            
+            // Se ainda não conseguiu, usa a data de criação do card
+            if (isNaN(dataInicio.getTime()) && card.createdAt) {
+              dataInicio = new Date(card.createdAt);
+            }
+            
+            if (!isNaN(dataInicio.getTime())) {
+              tempoResponsabilidade = formatTimeBetween(dataInicio, new Date());
+            }
           }
         }
       }
+    } catch (error) {
+      logger.warn('Erro ao buscar tempo de responsabilidade', error);
+      
+      // Fallback: calcula baseado na criação do card
+      if (card.createdAt) {
+        const dataInicio = new Date(card.createdAt);
+        const dataFim = new Date();
+        tempoResponsabilidade = pipefyService.calculateTimeBetween(dataInicio, dataFim);
+      }
     }
     
-    // 5. Remover responsável
-    console.log('🔄 Removendo responsável...');
+    // Remover responsável
     await pipefyService.removeAssigneeFromCard(cardId);
     
-    // 6. Limpar campos de responsável
-    console.log('🧹 Limpando campos de responsável...');
+    // Limpar campos de responsável
     await pipefyService.clearResponsavelFields(cardId);
     
-    // 7. Mover para TO-DO
-    console.log('🔄 Movendo para TO-DO...');
+    // Mover para TO-DO
     const movedCard = await pipefyService.moveCardToPhase(cardId, pipefyService.PHASES.TODO);
     
     if (!movedCard) {
-      return interaction.editReply('❌ Erro ao mover task para "TO-DO".');
+      throw new Error('Erro ao mover task para "TO-DO"');
     }
     
-    // 8. Adicionar comentário com tempo de responsabilidade
+    // Registrar alteração
+    await trackChange(cardId, 'LIBERAR_TASK', username, {
+      previousPhase: 'Em Andamento',
+      newPhase: 'TO-DO',
+      exResponsavel,
+      tempoResponsabilidade
+    });
+    
+    // Adicionar comentário
     await pipefyService.addComment(
       cardId, 
       `🔄 **Task liberada via Discord Bot**\n` +
@@ -785,15 +915,15 @@ async function handleLiberar(interaction, cardId, username, userId, userMapper) 
       `📝 **Status:** Disponível para outros`
     );
     
-    // 9. Responder com embed
+    // Responder
     const embed = new EmbedBuilder()
       .setTitle('🔄 Task Liberada!')
       .setColor('#FF9900')
       .setDescription(`Task voltou para a fila de disponíveis`)
       .addFields(
         { name: '📝 Título', value: card.title, inline: true },
-        { name: '🆔 Pipefy ID', value: cardId, inline: true },
-        { name: '📊 Status', value: 'Disponível (TO-DO)', inline: true },
+        { name: '🆔 Pipefy ID', value: `\`${cardId}\``, inline: true },
+        { name: '📊 Status', value: '📭 Disponível (TO-DO)', inline: true },
         { name: '👤 Ex-responsável', value: exResponsavel, inline: true },
         { name: '⏰ Tempo de responsabilidade', value: tempoResponsabilidade, inline: true },
         { name: '👤 Liberada por', value: username, inline: true }
@@ -804,72 +934,125 @@ async function handleLiberar(interaction, cardId, username, userId, userMapper) 
     await interaction.editReply({ embeds: [embed] });
     
   } catch (error) {
-    console.error('❌ Erro ao liberar task:', error);
-    await interaction.editReply(`❌ Erro ao liberar task: ${error.message}`);
+    logger.error('Erro ao liberar task', error);
+    throw error;
   }
 }
 
-async function handleAtribuir(interaction, taskInput, discordUser, username, userId, userMapper, taskCache) {
+// Função auxiliar para parsear datas pt-BR
+function parsePtBrDate(dateString) {
+  try {
+    // Formato: "05/02/2026, 18:30:25"
+    const [datePart, timePart] = dateString.split(', ');
+    const [day, month, year] = datePart.split('/').map(Number);
+    const [hour, minute, second] = timePart.split(':').map(Number);
+    
+    // Cria a data (mês é 0-indexed no JavaScript)
+    return new Date(year, month - 1, day, hour, minute, second);
+  } catch (error) {
+    logger.warn('Erro ao parsear data pt-BR', { dateString, error: error.message });
+    return new Date(NaN); // Retorna data inválida
+  }
+}
+
+async function handleAtribuir(interaction, rawCardId, discordUser) {
   await interaction.deferReply();
   
-  if (!hasPermission(interaction)) {
-    return interaction.editReply('❌ Você não tem permissão para atribuir tasks.');
-  }
-  
   try {
-    const taskData = await getTaskIdFromInput(taskInput, userId, 'todo', taskCache);
+    // Verificar permissão
+    checkCommandPermission(interaction, 'atribuir');
     
-    if (taskData.error) {
-      return interaction.editReply(`❌ ${taskData.error}`);
+    const username = interaction.user.username;
+    const userId = interaction.user.id;
+    
+    // Validar ID
+    const cardId = validateCardId(rawCardId);
+    
+    logger.info(`Atribuindo task`, { 
+      fromUserId: userId, 
+      toUserId: discordUser.id, 
+      cardId 
+    });
+    
+    // Verificar limite do usuário destino
+    const limitCheck = await checkUserTaskLimit(discordUser.id, discordUser.username, userMapperInstance);
+    if (!limitCheck.allowed) {
+      throw new Error(`Usuário ${discordUser.username} não pode receber mais tasks: ${limitCheck.reason}`);
     }
     
-    const cardId = taskData.id;
-    const taskTitle = taskData.title || 'Task';
-    
-    // Verificar se a task está realmente disponível
+    // Verificar disponibilidade
     const disponibilidade = await pipefyService.isCardAvailableInTodo(cardId);
     
     if (!disponibilidade.available) {
-      return interaction.editReply(`❌ Task não disponível: ${disponibilidade.reason}`);
+      throw new Error(`Task não disponível: ${disponibilidade.reason}`);
     }
     
     // Mover para Em Andamento
     const movedCard = await pipefyService.moveToEmAndamento(cardId);
     
     if (!movedCard) {
-      return interaction.editReply('❌ Erro ao mover task para "Em Andamento".');
+      throw new Error('Erro ao mover task para "Em Andamento"');
     }
     
+    // Registrar alteração
+    await trackChange(cardId, 'ATRIBUIR_TASK', username, {
+      assignedTo: discordUser.username,
+      assignedBy: username
+    });
+    
     // Obter email do usuário alvo
-    const userEmail = userMapper.getEmail(discordUser.id) || userMapper.getEmail(discordUser.username);
+    const userEmail = userMapperInstance.getEmail(discordUser.id) || userMapperInstance.getEmail(discordUser.username);
     
     // Adicionar comentário
     await pipefyService.addComment(cardId, 
-      `🎯 Task atribuída para ${discordUser.username} por ${username} via Discord Bot`
+      `🎯 **Task atribuída manualmente**\n` +
+      `👤 **Para:** ${discordUser.username}\n` +
+      `👑 **Por:** ${username}\n` +
+      `📅 **Em:** ${new Date().toLocaleString('pt-BR')}`
     );
     
-    // Tentar atribuir o usuário
+    // Tentar atribuir usuário
     if (userEmail) {
       try {
         await pipefyService.assignUserToCard(cardId, discordUser.username, userEmail);
       } catch (error) {
-        console.error('❌ Erro ao atribuir usuário no Pipefy:', error);
+        logger.warn('Erro ao atribuir usuário no Pipefy', error);
       }
     }
     
-    // Criar embed de resposta
+    // Atualizar campos
+    const fullname = userMapperInstance.getFullname(discordUser.id) || userMapperInstance.getFullname(discordUser.username);
+    const fieldsToUpdate = {};
+    
+    if (fullname && process.env.PIPEFY_FIELD_RESPONSAVEL_ID) {
+      fieldsToUpdate[process.env.PIPEFY_FIELD_RESPONSAVEL_ID] = fullname;
+    }
+    
+    if (userEmail && process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID) {
+      fieldsToUpdate[process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID] = userEmail;
+    }
+    
+    if (Object.keys(fieldsToUpdate).length > 0) {
+      await pipefyService.updateCardFields(cardId, fieldsToUpdate);
+    }
+    
+    // Buscar título para resposta
+    const card = await pipefyService.getCard(cardId);
+    const taskTitle = card?.title || 'Task';
+    
+    // Criar resposta
     const embed = new EmbedBuilder()
       .setTitle('✅ Task Atribuída!')
       .setColor('#00FF00')
       .setDescription(`Task atribuída com sucesso`)
       .addFields(
         { name: '📝 Título', value: taskTitle, inline: true },
-        { name: '🆔 Pipefy ID', value: cardId, inline: true },
-        { name: '📊 Status', value: 'Em Andamento', inline: true },
-        { name: '👤 Atribuído para', value: `${discordUser.username}\n(${discordUser.id})`, inline: true },
+        { name: '🆔 Pipefy ID', value: `\`${cardId}\``, inline: true },
+        { name: '📊 Status', value: '🔄 Em Andamento', inline: true },
+        { name: '👤 Atribuído para', value: `${discordUser.username}`, inline: true },
         { name: '👤 Atribuído por', value: username, inline: true }
       )
-      .setFooter({ text: `Usuário deve usar /task concluir quando finalizar` })
+      .setFooter({ text: `Usuário deve usar /task concluir id:<ID> quando finalizar` })
       .setTimestamp();
     
     if (userEmail) {
@@ -888,41 +1071,39 @@ async function handleAtribuir(interaction, taskInput, discordUser, username, use
     
     await interaction.editReply({ embeds: [embed] });
     
-    // Tentar enviar DM para o usuário
+    // Enviar DM para o usuário
     try {
       const dmEmbed = new EmbedBuilder()
         .setTitle('🎯 Nova Task Atribuída!')
         .setColor('#0099FF')
-        .setDescription(`Uma task foi atribuída para você`)
+        .setDescription(`Uma task foi atribuída para você por ${username}`)
         .addFields(
           { name: '📝 Título', value: taskTitle, inline: true },
-          { name: '🆔 Pipefy ID', value: cardId, inline: true },
-          { name: '👤 Atribuído por', value: username, inline: true }
+          { name: '🆔 Pipefy ID', value: `\`${cardId}\``, inline: true },
+          { name: '⏰ Prazo', value: `${TASK_TIMEOUT_HOURS}h`, inline: true }
         )
         .setFooter({ text: 'Use /task concluir id:<ID> para finalizar a task' })
         .setTimestamp();
       
       await discordUser.send({ embeds: [dmEmbed] });
     } catch (dmError) {
-      console.log(`⚠️ Não foi possível enviar DM para ${discordUser.username}`);
+      logger.warn(`Não foi possível enviar DM para ${discordUser.username}`, dmError);
     }
     
   } catch (error) {
-    console.error('Erro ao atribuir task:', error);
-    await interaction.editReply('❌ Erro ao atribuir task.');
+    logger.error('Erro ao atribuir task', error);
+    throw error;
   }
 }
 
-async function handleMinhas(interaction, userId, username, userMapper) {
+async function handleMinhas(interaction) {
   await interaction.deferReply();
   
   try {
-    const [tasksEmAndamento, tasksEmRevisao] = await Promise.all([
-      pipefyService.getCardsInPhase(pipefyService.PHASES.EM_ANDAMENTO, 50),
-      pipefyService.getCardsInPhase(pipefyService.PHASES.EM_REVISAO, 50)
-    ]);
+    const userId = interaction.user.id;
+    const username = interaction.user.username;
     
-    const userEmail = userMapper.getEmail(userId) || userMapper.getEmail(username);
+    const userEmail = userMapperInstance.getEmail(userId) || userMapperInstance.getEmail(username);
     
     if (!userEmail) {
       const embed = new EmbedBuilder()
@@ -931,18 +1112,39 @@ async function handleMinhas(interaction, userId, username, userMapper) {
         .setDescription('Seu usuário não está mapeado. Contacte um administrador para configurar seu email.')
         .setTimestamp();
       
-      return interaction.editReply({ embeds: [embed] });
+      await interaction.editReply({ embeds: [embed] });
+      return;
     }
+    
+    // Buscar tasks em andamento e revisão
+    const [tasksEmAndamento, tasksEmRevisao] = await Promise.allSettled([
+      pipefyService.getCardsInPhase(pipefyService.PHASES.EM_ANDAMENTO, 50),
+      pipefyService.getCardsInPhase(pipefyService.PHASES.EM_REVISAO, 50)
+    ]);
+    
+    const allTasks = [
+      ...(tasksEmAndamento.status === 'fulfilled' ? tasksEmAndamento.value : []),
+      ...(tasksEmRevisao.status === 'fulfilled' ? tasksEmRevisao.value : [])
+    ];
     
     const minhasTasks = [];
     
-    for (const task of [...tasksEmAndamento, ...tasksEmRevisao]) {
-      const cardDetails = await pipefyService.getCard(task.id);
-      if (cardDetails?.assignees?.some(assignee => assignee.email === userEmail)) {
-        const fase = cardDetails.current_phase?.id === pipefyService.PHASES.EM_ANDAMENTO 
-          ? 'Em Andamento' 
-          : 'Em Revisão';
-        minhasTasks.push({ ...task, fase });
+    for (const task of allTasks) {
+      try {
+        const cardDetails = await pipefyService.getCard(task.id);
+        if (cardDetails?.assignees?.some(assignee => assignee.email === userEmail)) {
+          const fase = cardDetails.current_phase?.id === pipefyService.PHASES.EM_ANDAMENTO 
+            ? '🔄 Em Andamento' 
+            : '📋 Em Revisão';
+          minhasTasks.push({ 
+            ...task, 
+            fase, 
+            phaseId: cardDetails.current_phase?.id,
+            cardDetails 
+          });
+        }
+      } catch (error) {
+        logger.warn(`Erro ao buscar detalhes da task ${task.id}`, error);
       }
     }
     
@@ -953,7 +1155,8 @@ async function handleMinhas(interaction, userId, username, userMapper) {
         .setDescription('Você não tem tasks atribuídas no momento.')
         .setTimestamp();
       
-      return interaction.editReply({ embeds: [embed] });
+      await interaction.editReply({ embeds: [embed] });
+      return;
     }
     
     const embed = new EmbedBuilder()
@@ -963,46 +1166,48 @@ async function handleMinhas(interaction, userId, username, userMapper) {
       .setTimestamp();
     
     minhasTasks.forEach((task, index) => {
+      const deadlineInfo = checkTaskDeadline(task);
+      const dias = Math.floor((Date.now() - new Date(task.createdAt).getTime()) / (1000 * 60 * 60 * 24));
+      
+      let statusEmoji = '🟢';
+      if (deadlineInfo.status === 'atrasada') statusEmoji = '🔴';
+      else if (deadlineInfo.status === 'alerta') statusEmoji = '🟡';
+      
       embed.addFields({
-        name: `${index + 1}. ${task.title.substring(0, 50)}${task.title.length > 50 ? '...' : ''}`,
-        value: `**ID:** \`${task.id}\`\n**Fase:** ${task.fase}\n**Desde:** ${new Date(task.createdAt).toLocaleDateString('pt-BR')}`,
+        name: `${statusEmoji} ${index + 1}. ${task.title.substring(0, 40)}${task.title.length > 40 ? '...' : ''}`,
+        value: `**ID:** \`${task.id}\`\n**Fase:** ${task.fase}\n**Tempo:** ${deadlineInfo.horas}h (${dias}d)\n**Desde:** ${new Date(task.createdAt).toLocaleDateString('pt-BR')}`,
         inline: false
       });
     });
     
+    const tasksAtrasadas = minhasTasks.filter(task => 
+      checkTaskDeadline(task).status === 'atrasada'
+    ).length;
+    
+    const tasksEmAlerta = minhasTasks.filter(task => 
+      checkTaskDeadline(task).status === 'alerta'
+    ).length;
+    
     embed.setFooter({ 
-      text: `Use /task concluir id:<ID> para finalizar uma task` 
+      text: `🔴 ${tasksAtrasadas} atrasadas | 🟡 ${tasksEmAlerta} em alerta | 🟢 ${minhasTasks.length - tasksAtrasadas - tasksEmAlerta} normais` 
     });
     
     await interaction.editReply({ embeds: [embed] });
     
   } catch (error) {
-    console.error('Erro ao buscar minhas tasks:', error);
-    await interaction.editReply('❌ Erro ao buscar suas tasks.');
+    logger.error('Erro ao buscar minhas tasks', error);
+    throw new Error('Erro ao buscar suas tasks');
   }
 }
 
 // ==================== COMANDO PRINCIPAL ====================
-
-// Inicializar instâncias
-const taskCacheInstance = new TaskCache(5);
-const userMapperInstance = new UserMapper();
-
-// Limpar cache periodicamente
-setInterval(() => taskCacheInstance.clearExpired(), 60 * 60 * 1000);
-
-// ==================== EXPORTAR FUNÇÕES PARA OUTROS ARQUIVOS ====================
-
 export {
-  hasPermission,
+  userMapperInstance,
   handleListar,
   handleConcluir,
   handleAprovar,
   handleLiberar,
-  handlePegar,
-  getTaskIdFromInput,
-  taskCacheInstance,
-  userMapperInstance
+  handlePegar
 };
 
 export default {
@@ -1043,7 +1248,7 @@ export default {
         .setDescription('Ver informações de uma task do Pipefy')
         .addStringOption(option =>
           option.setName('id')
-            .setDescription('ID da task no Pipefy')
+            .setDescription('ID completo da task no Pipefy (ex: 341883329)')
             .setRequired(true)
         )
     )
@@ -1056,7 +1261,7 @@ export default {
         .setDescription('Pegar uma task do Pipefy')
         .addStringOption(option =>
           option.setName('id')
-            .setDescription('ID da task no Pipefy ou número da listagem (ex: 1, 2, 3)')
+            .setDescription('ID completo da task no Pipefy (ex: 341883329)')
             .setRequired(true)
         )
     )
@@ -1065,13 +1270,13 @@ export default {
         .setDescription('Concluir uma task do Pipefy (vai para Revisão)')
         .addStringOption(option =>
           option.setName('id')
-            .setDescription('ID da task no Pipefy')
+            .setDescription('ID completo da task no Pipefy (ex: 341883329)')
             .setRequired(true)
         )
         .addStringOption(option =>
           option.setName('comentario')
-            .setDescription('Comentário sobre a conclusão')
-            .setRequired(false)
+            .setDescription('Comentário sobre a conclusão (obrigatório)')
+            .setRequired(true)
         )
     )
     .addSubcommand(sub =>
@@ -1079,13 +1284,13 @@ export default {
         .setDescription('Aprovar uma task em revisão')
         .addStringOption(option =>
           option.setName('id')
-            .setDescription('ID da task no Pipefy')
+            .setDescription('ID completo da task no Pipefy (ex: 341883329)')
             .setRequired(true)
         )
         .addStringOption(option =>
           option.setName('comentario')
-            .setDescription('Comentário sobre a aprovação')
-            .setRequired(false)
+            .setDescription('Comentário sobre a aprovação (obrigatório)')
+            .setRequired(true)
         )
     )
     .addSubcommand(sub =>
@@ -1093,7 +1298,7 @@ export default {
         .setDescription('Liberar uma task que está em andamento')
         .addStringOption(option =>
           option.setName('id')
-            .setDescription('ID da task no Pipefy')
+            .setDescription('ID completo da task no Pipefy (ex: 341883329)')
             .setRequired(true)
         )
     )
@@ -1102,7 +1307,7 @@ export default {
         .setDescription('Atribuir uma task a alguém (Admin/PM apenas)')
         .addStringOption(option =>
           option.setName('id')
-            .setDescription('ID da task no Pipefy ou número da listagem (ex: 1, 2, 3)')
+            .setDescription('ID completo da task no Pipefy (ex: 341883329)')
             .setRequired(true)
         )
         .addUserOption(option =>
@@ -1118,18 +1323,7 @@ export default {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
-    const user = interaction.user;
-    const username = user.username;
-    const userId = user.id;
-
-    // Verificar configuração do Pipefy
-    if (!process.env.PIPEFY_TOKEN || !process.env.PIPEFY_PIPE_ID) {
-      return interaction.reply({
-        content: '❌ Pipefy não está configurado. Configure o arquivo .env primeiro.',
-        ephemeral: true
-      });
-    }
-
+    
     try {
       switch(sub) {
         case 'test':
@@ -1138,8 +1332,8 @@ export default {
           
         case 'listar':
           const filtro = interaction.options.getString('filtro') || 'todo';
-          const limite = interaction.options.getInteger('limite') || 10;
-          await handleListar(interaction, filtro, limite, userId, taskCacheInstance);
+          const limite = interaction.options.getInteger('limite') || DEFAULT_TASK_LIMIT;
+          await handleListar(interaction, filtro, limite);
           break;
           
         case 'info':
@@ -1155,57 +1349,42 @@ export default {
           
         case 'pegar':
           const pegarId = interaction.options.getString('id');
-          await handlePegar(interaction, pegarId, username, userId, userMapperInstance, taskCacheInstance);
+          await handlePegar(interaction, pegarId);
           break;
           
         case 'concluir':
           const concluirId = interaction.options.getString('id');
-          const comentario = interaction.options.getString('comentario') || 'Desenvolvimento concluído via Discord Bot';
-          await handleConcluir(interaction, concluirId, comentario, username, userId, userMapperInstance, taskCacheInstance);;
+          const comentario = interaction.options.getString('comentario');
+          await handleConcluir(interaction, concluirId, comentario);
           break;
           
         case 'aprovar':
           const aprovarId = interaction.options.getString('id');
-          const aprovarComentario = interaction.options.getString('comentario') || 'Aprovado via Discord Bot';
-          await handleAprovar(interaction, aprovarId, aprovarComentario, username);
+          const aprovarComentario = interaction.options.getString('comentario');
+          await handleAprovar(interaction, aprovarId, aprovarComentario);
           break;
           
         case 'liberar':
           const liberarId = interaction.options.getString('id');
-          await handleLiberar(interaction, liberarId, username, userId, userMapperInstance);
+          await handleLiberar(interaction, liberarId);
           break;
           
         case 'atribuir':
           const taskInput = interaction.options.getString('id');
           const discordUser = interaction.options.getUser('usuario');
-          await handleAtribuir(interaction, taskInput, discordUser, username, userId, userMapperInstance, taskCacheInstance);
+          await handleAtribuir(interaction, taskInput, discordUser);
           break;
           
         case 'minhas':
-          await handleMinhas(interaction, userId, username, userMapperInstance);
+          await handleMinhas(interaction);
           break;
           
         default:
-          await interaction.reply({
-            content: '❌ Subcomando não reconhecido.',
-            ephemeral: true
-          });
+          throw new Error('Subcomando não reconhecido');
       }
     } catch (error) {
-      console.error(`[${sub}] Erro:`, error);
-      
-      const errorMessage = error.response?.data?.errors?.[0]?.message 
-        || error.message 
-        || 'Erro desconhecido';
-      
-      const replyMethod = interaction.replied || interaction.deferred 
-        ? interaction.editReply 
-        : interaction.reply;
-      
-      await replyMethod({
-        content: `❌ Erro ao executar ${sub}: ${errorMessage.substring(0, 100)}`,
-        ephemeral: true
-      });
+      logger.error(`Erro no comando task:${sub}`, error);
+      throw error;
     }
   }
 };

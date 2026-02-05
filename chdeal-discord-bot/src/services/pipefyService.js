@@ -1,4 +1,6 @@
+//src/services/pipefyServices.js
 import axios from 'axios';
+import { logger } from '../utils/logger.js';
 
 console.log('🔧 Pipefy Service iniciado');
 
@@ -27,26 +29,34 @@ console.log('📊 Fases configuradas:', PHASES);
 // Função para fazer requisições GraphQL
 async function graphqlRequest(query, variables = {}) {
   try {
-    console.log('📤 Query:', query.substring(0, 100).replace(/\n/g, ' ') + '...');
+    logger.debug('Enviando query GraphQL', { 
+      query: query.substring(0, 100).replace(/\n/g, ' '),
+      variables: Object.keys(variables)
+    });
+    
     const response = await pipefy.post('', { query, variables });
     
     if (response.data.errors) {
-      console.error('❌ Erro GraphQL:', JSON.stringify(response.data.errors, null, 2));
-      return null;
+      logger.error('Erro GraphQL', null, {
+        errors: response.data.errors,
+        query: query.substring(0, 200)
+      });
+      throw new Error(response.data.errors[0]?.message || 'Erro GraphQL');
     }
     
     return response.data.data;
   } catch (error) {
-    console.error('❌ Erro de rede:', error.message);
-    if (error.response?.data) {
-      console.error('Resposta:', JSON.stringify(error.response.data, null, 2));
-    }
-    return null;
+    logger.error('Erro na requisição GraphQL', error, {
+      query: query.substring(0, 100),
+      variables: Object.keys(variables)
+    });
+    throw error;
   }
 }
 
 // Buscar card específico - CORRIGIDO
 async function getCard(cardId) {
+  
   console.log(`🔍 Buscando card ${cardId}`);
   
   const query = `
@@ -58,6 +68,10 @@ async function getCard(cardId) {
           name
           email
         }
+        fields {
+          name
+          value
+        }
         current_phase {
           id
           name
@@ -66,9 +80,12 @@ async function getCard(cardId) {
       }
     }
   `;
-  
+
   const data = await graphqlRequest(query, { id: cardId });
-  return data?.card;
+  if (!data?.card) {
+    throw new Error(`Card ${cardId} não encontrado`);
+  }
+  return data.card;
 }
 
 // Buscar cards da fase TO-DO - CORRIGIDO

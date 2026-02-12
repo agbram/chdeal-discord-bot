@@ -60,3 +60,5 @@ export function validateEnvironment() {
   console.log('✅ Ambiente validado com sucesso');
   return true;
 }
+
+export default validateEnvironment;

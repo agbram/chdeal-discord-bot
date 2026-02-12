@@ -16,7 +16,7 @@ export default {
     const ephemeral = interaction.options.getBoolean('oculto') || false;
     
     // Medir latência
-    const sent = await interaction.deferReply({ fetchReply: true, ephemeral });
+    const sent = await interaction.deferReply({ fetchReply: true, flags: ephemeral ? 64 : 0 });
     const latency = sent.createdTimestamp - interaction.createdTimestamp;
     const apiLatency = Math.round(interaction.client.ws.ping);
 
@@ -34,4 +34,4 @@ export default {
 
     await interaction.editReply({ embeds: [embed] });
   },
-};
+}

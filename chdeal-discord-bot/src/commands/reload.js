@@ -2,6 +2,7 @@
 import { SlashCommandBuilder, EmbedBuilder } from 'discord.js';
 import { isUserAdmin } from '../utils/permissions.js';
 import { logger } from '../utils/logger.js';
+import { formatUptime } from '../utils/commonUtils.js';
 
 export default {
   data: new SlashCommandBuilder()
@@ -14,7 +15,7 @@ export default {
       if (!isUserAdmin(interaction)) {
         return interaction.reply({
           content: '❌ Apenas administradores podem usar este comando.',
-          ephemeral: true
+          flags: 64
         });
       }
 
@@ -37,7 +38,7 @@ export default {
         .setFooter({ text: `Solicitado por ${interaction.user.username}` })
         .setTimestamp();
 
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.reply({ embeds: [embed], flags: 64});
       
     } catch (error) {
       logger.error('Erro no comando reload', error);
@@ -45,7 +46,7 @@ export default {
       try {
         await interaction.reply({
           content: `❌ Erro: ${error.message.substring(0, 100)}`,
-          ephemeral: true
+          flags: 64
         });
       } catch (replyError) {
         logger.error('Não foi possível responder ao comando reload', replyError);
@@ -53,19 +54,3 @@ export default {
     }
   }
 };
-
-function formatUptime(uptime) {
-  const seconds = Math.floor(uptime / 1000);
-  const days = Math.floor(seconds / (24 * 3600));
-  const hours = Math.floor((seconds % (24 * 3600)) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-
-  const parts = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}m`);
-  if (secs > 0) parts.push(`${secs}s`);
-
-  return parts.join(' ') || '0s';
-}

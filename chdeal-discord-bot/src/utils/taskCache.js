@@ -11,6 +11,60 @@ export class TaskCache {
     this.startCleanupInterval();
   }
 
+    invalidateByTaskId(taskId) {
+    let invalidatedKeys = [];
+    for (const [key, value] of this.cache.entries()) {
+      if (Array.isArray(value.data)) {
+        const hasTask = value.data.some(task => task && task.id === taskId);
+        if (hasTask) {
+          this.cache.delete(key);
+          invalidatedKeys.push(key);
+        }
+      }
+    }
+    
+    if (invalidatedKeys.length > 0) {
+      logger.info('Cache invalidado por taskId', { 
+        taskId, 
+        invalidatedKeys: invalidatedKeys.length 
+      });
+    }
+  }
+
+  // NOVO: Invalida cache por fase
+  invalidateByPhase(phaseId) {
+    const phaseKeys = [
+      `phase_${phaseId}`,
+      `todo_list`,
+      `dashboard_data`
+    ];
+    
+    let invalidated = 0;
+    phaseKeys.forEach(key => {
+      if (this.cache.has(key)) {
+        this.cache.delete(key);
+        invalidated++;
+      }
+    });
+    
+    if (invalidated > 0) {
+      logger.info('Cache invalidado por fase', { phaseId, invalidated });
+    }
+  }
+
+  // NOVO: Invalida tudo relacionado a tasks
+  invalidateAllTasks() {
+    const taskKeys = Array.from(this.cache.keys()).filter(key => 
+      key.includes('phase_') || 
+      key.includes('todo') || 
+      key.includes('dashboard') ||
+      key.includes('card_')
+    );
+    
+    taskKeys.forEach(key => this.cache.delete(key));
+    logger.info('Cache de tasks completamente invalidado', { invalidated: taskKeys.length });
+  }
+
   set(key, data) {
     this.cache.set(key, {
       data,

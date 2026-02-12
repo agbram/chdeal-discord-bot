@@ -1,11 +1,11 @@
 // ecosystem.config.js - Configuração para PM2
 module.exports = {
   apps: [{
-    name: 'pipefy-bot',
+    name: 'cherdeal-bot',
     script: './src/index.js',
     instances: 1,
     autorestart: true,
-    watch: false,
+    watch: true,
     max_memory_restart: '500M',
     env: {
       NODE_ENV: 'production',

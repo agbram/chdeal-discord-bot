@@ -18,7 +18,7 @@ export default {
   async execute(interaction) {
     const categoria = interaction.options.getString('categoria') || 'principal';
     
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: 64});
 
     if (categoria === 'tasks_basico') {
       return await showTasksBasico(interaction);

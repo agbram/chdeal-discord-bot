@@ -20,7 +20,7 @@ export default {
     ),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: 64});
     
     const secao = interaction.options.getString('secao') || 'comandos';
     
@@ -113,8 +113,23 @@ async function showComandos(interaction) {
 
 async function showStatus(interaction) {
   const metricsData = metrics.getStats();
-  const cacheStats = taskCacheInstance.getStats();
-  const userStats = userMapperInstance.getStats();
+
+let cacheStats = { size: 0, hitRate: '0%', hits: 0, misses: 0 };
+    try {
+        const { taskCacheInstance } = await import('../utils/taskCache.js');
+        cacheStats = taskCacheInstance.getStats();
+    } catch (error) {
+        console.warn('Cache não disponível:', error.message);
+    }
+
+        let userStats = { totalMapped: 0, totalFullnames: 0 };
+    try {
+        const { userMapperInstance } = await import('../commands/task/index.js');
+        const userStats = userMapperInstance.getStats();
+    } catch (error) {
+        console.warn('UserMapper não disponível:', error.message);
+    }
+
   const rateLimitStats = rateLimiter.getStats();
 
   const embed = new EmbedBuilder()

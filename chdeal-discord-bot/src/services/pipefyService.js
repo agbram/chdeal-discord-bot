@@ -1,4 +1,4 @@
-//src/services/pipefyServices.js
+//src/services/pipefyService.js
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 
@@ -252,11 +252,12 @@ async function getPipeMembers() {
 }
 
 // Função para atribuir usuário - CORRIGIDA
+// NOVA FUNÇÃO: Atribuir usuário usando a API do Pipefy (versão melhorada)
 async function assignUserToCard(cardId, username, userEmail) {
-  console.log(`👤 Atribuindo ${username} (${userEmail}) ao card ${cardId}`);
+  console.log(`👤 Tentando atribuir ${username} (${userEmail}) ao card ${cardId}`);
   
   try {
-    // Buscar membros do pipe
+    // Primeiro, buscar o ID do usuário no Pipefy pelo email
     const members = await getPipeMembers();
     
     if (members.length === 0) {
@@ -264,20 +265,20 @@ async function assignUserToCard(cardId, username, userEmail) {
       return await fallbackAssignment(cardId, username, userEmail);
     }
     
-    // Buscar o usuário pelo email
+    // Buscar o usuário pelo email (exato)
     const member = members.find(m => 
       m.email && m.email.toLowerCase() === userEmail.toLowerCase()
     );
     
     if (!member) {
       console.log(`❌ Usuário ${userEmail} não encontrado no pipe`);
-      console.log(`📋 Membros disponíveis: ${members.map(m => m.email).filter(Boolean).join(', ')}`);
+      console.log('📋 Membros disponíveis:', members.map(m => ({name: m.name, email: m.email})));
       return await fallbackAssignment(cardId, username, userEmail);
     }
     
-    console.log(`✅ Encontrado membro: ${member.name} (ID: ${member.id})`);
+    console.log(`✅ Encontrado membro: ${member.name} (ID: ${member.id}, Email: ${member.email})`);
     
-    // Tentar atribuir usando assignee_ids
+    // Usar a mutation de updateCard com assignee_ids
     const mutation = `
       mutation UpdateCard($input: UpdateCardInput!) {
         updateCard(input: $input) {
@@ -300,51 +301,72 @@ async function assignUserToCard(cardId, username, userEmail) {
       }
     };
     
+    console.log('🔄 Atribuindo usuário via assignee_ids:', variables);
     const result = await graphqlRequest(mutation, variables);
     
     if (result?.updateCard?.card) {
       console.log('✅ Usuário atribuído com sucesso!');
-      console.log(`👥 Assignees: ${result.updateCard.card.assignees.map(a => a.name).join(', ')}`);
+      console.log(`👥 Assignees agora:`, result.updateCard.card.assignees);
       return result.updateCard.card;
     }
     
-    console.log('⚠️ Não foi possível atribuir via assignee_ids, usando fallback...');
+    console.log('⚠️ Não foi possível atribuir via assignee_ids');
     return await fallbackAssignment(cardId, username, userEmail);
     
   } catch (error) {
     console.error('❌ Erro na atribuição:', error.message);
+    if (error.response?.data) {
+      console.error('Detalhes do erro:', JSON.stringify(error.response.data, null, 2));
+    }
     return await fallbackAssignment(cardId, username, userEmail);
   }
 }
 
-// Função de fallback para atribuição
+// Função de fallback melhorada
 async function fallbackAssignment(cardId, username, userEmail) {
   console.log('🔄 Usando método fallback de atribuição...');
   
   try {
-    // Adicionar comentário com a atribuição
-    await addComment(cardId, 
-      `👤 Atribuído para: ${username} (${userEmail}) via Discord Bot\n\n` +
-      `⚠️ A atribuição formal pode não ter funcionado. ` +
-      `Verifique se ${userEmail} é membro do pipe.`
-    );
+    // Usar os GraphQL IDs diretamente
+    const fieldsToUpdate = {};
     
-    console.log('✅ Comentário de atribuição adicionado');
-    
-    // Buscar o card atualizado
-    const card = await getCard(cardId);
-    
-    if (card?.assignees?.some(a => a.email === userEmail)) {
-      console.log('✅ Usuário já está atribuído ao card');
+    // Campo "Responsável"
+    if (process.env.PIPEFY_FIELD_RESPONSAVEL_ID) {
+      fieldsToUpdate[process.env.PIPEFY_FIELD_RESPONSAVEL_ID] = username;
     }
     
-    return card;
+    // Campo "Email do Responsável"
+    if (userEmail && process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID) {
+      fieldsToUpdate[process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID] = userEmail;
+    }
+    
+    console.log(`📝 Atualizando campos com GraphQL IDs:`, fieldsToUpdate);
+    
+    if (Object.keys(fieldsToUpdate).length > 0) {
+      for (const [fieldId, value] of Object.entries(fieldsToUpdate)) {
+        console.log(`  → ${fieldId}: ${value}`);
+        await updateCardField(cardId, fieldId, value);
+      }
+    }
+    
+    // Adicionar comentário
+    await addComment(cardId, 
+      `👤 **Atribuição via Discord Bot**\n` +
+      `**Responsável:** ${username}\n` +
+      `**Email:** ${userEmail || 'Não informado'}\n` +
+      `**Status:** Atribuído nos campos personalizados`
+    );
+    
+    console.log('✅ Atribuição realizada com sucesso!');
+    
+    return await getCard(cardId);
     
   } catch (error) {
     console.error('❌ Erro no método fallback:', error.message);
     return null;
   }
 }
+
 // Remover responsável do card
 async function removeAssigneeFromCard(cardId) {
   console.log(`👤 Removendo responsável do card ${cardId}`);
@@ -470,54 +492,101 @@ async function isCardAvailableInTodo(cardId, userEmail = null) {
     };
   }
 }
-// pipefyService.js - Adicione estas funções
 
-// Função para atualizar campos do card
-async function updateCardFields(cardId, fields) {
-  console.log(`🔄 Atualizando campos do card ${cardId}:`, fields);
+
+
+// FUNÇÃO CORRIGIDA - Mutation simplificada
+async function updateCardField(cardId, fieldIdentifier, value) {
+  console.log(`📝 Atualizando campo ${fieldIdentifier} no card ${cardId}: ${value}`);
   
   try {
-    const updates = [];
-    
-    for (const [fieldId, value] of Object.entries(fields)) {
-      const mutation = `
-        mutation UpdateCardField($input: UpdateCardFieldInput!) {
-          updateCardField(input: $input) {
-            success
-          }
+    // Mutation CORRETA - sem o campo 'card_field'
+    const mutation = `
+      mutation UpdateCardField($input: UpdateCardFieldInput!) {
+        updateCardField(input: $input) {
+          success
         }
-      `;
-      
-      const variables = {
-        input: {
-          card_id: cardId,
-          field_id: fieldId,
-          new_value: value
-        }
-      };
-      
-      try {
-        const result = await graphqlRequest(mutation, variables);
-        if (result?.updateCardField?.success) {
-          console.log(`✅ Campo ${fieldId} atualizado: ${value}`);
-          updates.push({ fieldId, value, success: true });
-        } else {
-          console.log(`❌ Falha ao atualizar campo ${fieldId}`);
-          updates.push({ fieldId, value, success: false });
-        }
-      } catch (error) {
-        console.error(`❌ Erro ao atualizar campo ${fieldId}:`, error.message);
-        updates.push({ fieldId, value, success: false, error: error.message });
       }
-      
-      // Pequena pausa para não sobrecarregar a API
-      await new Promise(resolve => setTimeout(resolve, 300));
+    `;
+    
+    const variables = {
+      input: {
+        card_id: cardId,
+        field_id: fieldIdentifier, // Pode ser internal_id ou nome
+        new_value: value
+      }
+    };
+    
+    console.log('📤 Enviando mutation:', JSON.stringify(variables, null, 2));
+    
+    const result = await graphqlRequest(mutation, variables);
+    
+    if (result?.updateCardField) {
+      console.log('✅ Resultado:', result.updateCardField);
+      return {
+        success: result.updateCardField.success === true
+      };
     }
     
-    return updates;
+    return { success: false, error: 'Resposta inválida' };
+    
   } catch (error) {
-    console.error('❌ Erro em updateCardFields:', error);
-    return [];
+    console.error(`❌ Erro ao atualizar campo ${fieldIdentifier}:`, error.message);
+    
+    // Se falhar com internal_id, tentar buscar o ID numérico
+    if (error.message.includes('not found') || error.message.includes('invalid')) {
+      console.log(`🔄 Tentando buscar ID numérico para ${fieldIdentifier}...`);
+      
+      try {
+        // Primeiro, buscar o card para ver os campos
+        const card = await getCard(cardId);
+        if (card && card.fields) {
+          // Tentar encontrar pelo internalId ou name
+          const campo = card.fields.find(f => 
+            (f.internal_id === fieldIdentifier || f.name === fieldIdentifier)
+          );
+          
+          if (campo && campo.field && campo.field.id) {
+            console.log(`✅ Encontrado campo: ${campo.name} (ID: ${campo.field.id})`);
+            
+            // Tentar com o ID numérico
+            const mutation2 = `
+              mutation UpdateCardField($input: UpdateCardFieldInput!) {
+                updateCardField(input: $input) {
+                  success
+                }
+              }
+            `;
+            
+            const variables2 = {
+              input: {
+                card_id: cardId,
+                field_id: campo.field.id, // ID numérico
+                new_value: value
+              }
+            };
+            
+            console.log('🔄 Tentando com ID numérico:', variables2);
+            const result2 = await graphqlRequest(mutation2, variables2);
+            
+            if (result2?.updateCardField) {
+              return {
+                success: result2.updateCardField.success === true,
+                usedNumericId: true,
+                fieldId: campo.field.id
+              };
+            }
+          }
+        }
+      } catch (e) {
+        console.log('Erro ao buscar ID numérico:', e.message);
+      }
+    }
+    
+    return { 
+      success: false, 
+      error: error.message
+    };
   }
 }
 
@@ -689,6 +758,7 @@ async function moveToRevisao(cardId) {
 
 // Adicionar alias para manter compatibilidade com o comando
 const REVISAO = PHASES.EM_REVISAO;
+const makeGraphQLRequest = graphqlRequest;
 
 export default {
   // Constantes
@@ -714,8 +784,10 @@ export default {
   assignUserToCard,
   
   // Novas funções para campos e comentários
-  updateCardFields,
+  updateCardField,
   clearResponsavelFields,
-  calculateTimeBetween,
-  getCardComments
+  calculateTimeBetween,  
+  getCardComments,
+
+  makeGraphQLRequest
 };

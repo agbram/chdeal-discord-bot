@@ -26,34 +26,70 @@ const client = new Client({
 // Inicializar a coleção de comandos
 client.commands = new Collection();
 
-// Função para carregar comandos
 async function loadCommands() {
   try {
     const commandsPath = path.join(__dirname, 'commands');
-    const commandFiles = fs
-      .readdirSync(commandsPath)
-      .filter(file => file.endsWith('.js'));
+    
+    logger.info(`Carregando comandos de ${commandsPath}`);
 
-    logger.info(`Carregando comandos`, { count: commandFiles.length });
-
-    for (const file of commandFiles) {
-      try {
-        const filePath = path.join(commandsPath, file);
-        const module = await import(`file://${filePath}`);
-        const command = module.default;
-
-        // Validação do comando
-        if (!command?.data?.name || typeof command.execute !== 'function') {
-          logger.error(`Comando inválido`, { file });
-          continue;
+    // Lista de diretórios a ignorar
+    const ignoreDirs = ['handlers', 'utils', 'node_modules'];
+    
+    // Função recursiva para buscar comandos
+    async function searchForCommands(dir) {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      const commands = [];
+      
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        
+        if (entry.isDirectory()) {
+          if (!ignoreDirs.includes(entry.name)) {
+            const subCommands = await searchForCommands(fullPath);
+            commands.push(...subCommands);
+          }
+        } else if (entry.isFile() && entry.name.endsWith('.js')) {
+          // Ignorar arquivos utilitários
+          if (entry.name === 'constants.js' || 
+              entry.name === 'validations.js' ||
+              entry.name === 'businessRules.js' ||
+              entry.name === 'permissions.js' ||
+              entry.name === 'taskHelpers.js') {
+            continue;
+          }
+          
+          try {
+            const module = await import(`file://${fullPath}`);
+            const command = module.default;
+            
+            if (command?.data?.name && typeof command.execute === 'function') {
+              commands.push({ path: fullPath, command });
+            }
+          } catch (error) {
+            logger.error(`Erro ao carregar arquivo`, error, { file: fullPath });
+          }
         }
-
+      }
+      
+      return commands;
+    }
+    
+    const foundCommands = await searchForCommands(commandsPath);
+    
+    logger.info(`Encontrados ${foundCommands.length} comandos`);
+    
+    for (const { path: filePath, command } of foundCommands) {
+      try {
         client.commands.set(command.data.name, command);
-        logger.info(`Comando carregado`, { command: command.data.name });
+        logger.info(`Comando carregado`, { 
+          command: command.data.name,
+          file: path.relative(commandsPath, filePath)
+        });
       } catch (error) {
-        logger.error(`Erro ao carregar comando`, error, { file });
+        logger.error(`Erro ao configurar comando`, error, { file: filePath });
       }
     }
+    
   } catch (error) {
     logger.error('Erro ao carregar comandos', error);
   }
@@ -85,7 +121,7 @@ async function handleButtonInteraction(interaction) {
     // Botão para ver descrição da task
     if (interaction.customId.startsWith('show_desc_')) {
       const cardId = interaction.customId.replace('show_desc_', '');
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({flags: 64});
 
       try {
         const pipefyService = (await import('./services/pipefyService.js')).default;
@@ -123,8 +159,126 @@ async function handleButtonInteraction(interaction) {
       
       await interaction.reply({
         content: `📋 **ID da Task:** \`${cardId}\`\n\n**Comandos rápidos:**\n\`/task pegar id:${cardId}\`\n\`/task info id:${cardId}\`\n\`/task concluir id:${cardId}\``,
-        ephemeral: true
+        flags: 64
       });
+      return;
+    }
+        // ========== BOTÕES DO DOCS ==========
+    else if (interaction.customId === 'docs_status') {
+      await interaction.deferUpdate();
+      const docsModule = await import('./commands/docs.js');
+      await docsModule.showStatus(interaction);
+      return;
+    }
+    else if (interaction.customId === 'docs_config') {
+      await interaction.deferUpdate();
+      const docsModule = await import('./commands/docs.js');
+      await docsModule.showConfig(interaction);
+      return;
+    }
+    
+    // ========== BOTÕES DO HELP ==========
+    else if (interaction.customId === 'help_tasks') {
+      await interaction.deferUpdate();
+      const helpModule = await import('./commands/help.js');
+      await helpModule.showTasksBasico(interaction);
+      return;
+    }
+    else if (interaction.customId === 'help_admin') {
+      await interaction.deferUpdate();
+      const helpModule = await import('./commands/help.js');
+      await helpModule.showAdmin(interaction);
+      return;
+    }
+    
+    // ========== BOTÕES DO PERFIL ==========
+    else if (interaction.customId === 'perfil_comparar') {
+      await interaction.deferReply({ flags: 64 });
+      
+      const targetUser = interaction.message?.embeds?.[0]?.title?.match(/PERFIL DE (.+)/)?.[1];
+      if (targetUser) {
+        const embed = new EmbedBuilder()
+          .setTitle('🔍 COMPARAÇÃO DE PERFIL')
+          .setColor('#5865F2')
+          .setDescription(`Comparação com ${targetUser}`)
+          .addFields(
+            { name: '📊 Status', value: 'Funcionalidade em desenvolvimento', inline: false },
+            { name: '📈 Próximos Passos', value: '• Comparar pontos\n• Comparar conquistas\n• Comparar ranking', inline: false }
+          );
+        await interaction.editReply({ embeds: [embed] });
+      } else {
+        await interaction.editReply('❌ Não foi possível identificar o perfil para comparação.');
+      }
+      return;
+    }
+    // ========== NOVOS BOTÕES DE GAMIFICAÇÃO ==========
+    
+    // Botões do ranking
+    else if (interaction.customId === 'ranking_semanal') {
+      await interaction.deferUpdate();
+      const rankingModule = await import('./commands/ranking.js');
+      await rankingModule.default.showRankingSemanal(interaction);
+      return;
+    }
+    else if (interaction.customId === 'ranking_streak') {
+      await interaction.deferUpdate();
+      const rankingModule = await import('./commands/ranking.js');
+      await rankingModule.default.showRankingStreak(interaction);
+      return;
+    }
+    else if (interaction.customId === 'ranking_velocidade') {
+      await interaction.deferUpdate();
+      const rankingModule = await import('./commands/ranking.js');
+      await rankingModule.default.showRankingVelocidade(interaction);
+      return;
+    }
+    
+    // Botões do perfil
+    else if (interaction.customId === 'perfil_conquistas') {
+      await interaction.deferReply({ flags: 64});
+      const conquistasModule = await import('./commands/conquistas.js');
+      await conquistasModule.default.execute(interaction);
+      return;
+    }
+    else if (interaction.customId === 'perfil_comparar') {
+      await interaction.deferReply({ flags: 64});
+      // Implementar comparação se necessário
+      await interaction.editReply('🔧 Funcionalidade em desenvolvimento!');
+      return;
+    }
+    else if (interaction.customId === 'perfil_ranking') {
+      await interaction.deferReply({ flags: 64 });
+      const rankingModule = await import('./commands/ranking.js');
+      const data = { getSubcommand: () => 'geral' };
+      interaction.options = { getString: () => 'geral' };
+      await rankingModule.default.showRankingGeral(interaction);
+      return;
+    }
+    
+    // Botões das missões
+    else if (interaction.customId === 'missoes_reclamar') {
+      await interaction.deferUpdate();
+      // Implementar lógica para reclamar recompensas
+      const embed = new EmbedBuilder()
+        .setTitle('🎁 Recompensas Reclamadas!')
+        .setColor('#00FF00')
+        .setDescription('Sua recompensa foi adicionada aos seus pontos!')
+        .setTimestamp();
+      
+      await interaction.editReply({ embeds: [embed], components: [] });
+      return;
+    }
+    else if (interaction.customId === 'missoes_atualizar') {
+      await interaction.deferUpdate();
+      const missoesModule = await import('./commands/missoes.js');
+      await missoesModule.default.execute(interaction);
+      return;
+    }
+    
+    // Botões do admin-reset (confirmação)
+    else if (interaction.customId.startsWith('confirm_reset_') || 
+             interaction.customId === 'cancel_reset') {
+      // Estes são tratados dentro do comando admin-reset
       return;
     }
   } catch (error) {
@@ -136,7 +290,7 @@ async function handleButtonInteraction(interaction) {
       } else {
         await interaction.reply({
           content: '❌ Ocorreu um erro ao processar o botão.',
-          ephemeral: true
+          flags: 64
         });
       }
     } catch (replyError) {
@@ -146,7 +300,7 @@ async function handleButtonInteraction(interaction) {
 }
 
 // Configurar eventos do bot
-client.once('ready', () => {
+client.once('clientReady', () => {
   logger.info(`Bot online`, { 
     tag: client.user.tag,
     commands: client.commands.size,
@@ -161,19 +315,14 @@ client.once('ready', () => {
 });
 
 client.on('interactionCreate', async interaction => {
-  // Handler para botões interativos
   if (interaction.isButton()) {
     return handleButtonInteraction(interaction);
   }
   
-  // Handler para comandos slash
   if (!interaction.isChatInputCommand()) return;
 
   const command = client.commands.get(interaction.commandName);
-  if (!command) {
-    logger.warn('Comando não encontrado', { commandName: interaction.commandName });
-    return;
-  }
+  if (!command) return;
 
   try {
     // Rate Limiting
@@ -181,30 +330,10 @@ client.on('interactionCreate', async interaction => {
     if (!rateLimit.allowed) {
       await interaction.reply({
         content: `⏰ Muitas requisições. Tente novamente em ${rateLimit.retryAfter} segundos.`,
-        ephemeral: true
+        flags: 64
       });
       return;
     }
-
-    // Obter subcomando de forma segura
-    let subcommand = 'default';
-    try {
-      subcommand = interaction.options.getSubcommand();
-    } catch (error) {
-      // Comando não tem subcomandos
-      subcommand = 'default';
-    }
-    
-    // Registrar métrica
-    metrics.recordCommand(
-      interaction.user.id,
-      interaction.user.username,
-      interaction.commandName,
-      subcommand
-    );
-    
-    // Log do comando
-    logger.command(interaction, subcommand);
 
     // Executar comando
     await command.execute(interaction);
@@ -212,40 +341,25 @@ client.on('interactionCreate', async interaction => {
   } catch (error) {
     logger.error(`Erro ao executar comando`, error, {
       command: interaction.commandName,
-      userId: interaction.user.id,
-      errorStack: error.stack
+      userId: interaction.user.id
     });
     
-    // Registrar erro nas métricas
-    try {
-      const subcommand = interaction.options?.getSubcommand?.() || 'default';
-      metrics.recordError(interaction.commandName, subcommand, error);
-    } catch (e) {
-      metrics.recordError(interaction.commandName, 'default', error);
-    }
-    
-    const errorMessage = error.response?.data?.errors?.[0]?.message 
-      || error.message 
-      || 'Erro desconhecido';
-    
-    try {
-      // Tentar responder de forma segura
-      if (interaction.replied || interaction.deferred) {
-        await interaction.editReply({
-          content: `❌ Erro: ${errorMessage.substring(0, 500)}`,
-          ephemeral: true
-        });
-      } else {
-        await interaction.reply({
-          content: `❌ Erro: ${errorMessage.substring(0, 500)}`,
-          ephemeral: true
-        });
-      }
-    } catch (replyError) {
-      logger.error('Erro ao responder com erro', replyError, {
-        originalError: error.message
+    // Usar handler padronizado
+    import('../middleware/errorHandler.js')
+      .then(({ commandErrorHandler }) => {
+        return commandErrorHandler(interaction, error);
+      })
+      .catch(() => {
+        // Fallback básico
+        if (interaction.deferred || interaction.replied) {
+          return interaction.editReply('❌ Ocorreu um erro ao executar o comando.');
+        } else {
+          return interaction.reply({ 
+            content: '❌ Ocorreu um erro ao executar o comando.', 
+            flags: 64 
+          });
+        }
       });
-    }
   }
 });
 

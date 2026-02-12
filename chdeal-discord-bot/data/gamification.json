@@ -1,0 +1,55 @@
+{
+  "users": [
+    {
+      "userId": "651238067197444147",
+      "username": "agbram",
+      "points": 150,
+      "level": 1,
+      "streak": 0,
+      "totalTasks": 0,
+      "tasksCompleted": 0,
+      "tasksApproved": 0,
+      "bugFixes": 0,
+      "firstApprovals": 0,
+      "lastActivity": "2026-02-08T22:48:25.475Z",
+      "streakDate": "2026-02-08T22:48:25.475Z",
+      "achievementsUnlocked": [],
+      "weeklyStats": {
+        "tasksCompleted": 0,
+        "pointsEarned": 150,
+        "streakDays": 0
+      },
+      "badges": []
+    },
+    {
+      "userId": "539086875927773224",
+      "username": "znh6011",
+      "points": 0,
+      "level": 1,
+      "streak": 0,
+      "totalTasks": 0,
+      "tasksCompleted": 0,
+      "tasksApproved": 0,
+      "bugFixes": 0,
+      "firstApprovals": 0,
+      "lastActivity": "2026-02-09T02:44:58.044Z",
+      "streakDate": "2026-02-09T02:44:58.044Z",
+      "achievementsUnlocked": [],
+      "weeklyStats": {
+        "tasksCompleted": 0,
+        "pointsEarned": 0,
+        "streakDays": 0
+      },
+      "badges": []
+    }
+  ],
+  "leaderboard": [
+    {
+      "userId": "651238067197444147",
+      "username": "agbram",
+      "points": 150,
+      "level": 1
+    }
+  ],
+  "lastUpdated": "2026-02-09T02:44:58.044Z"
+}

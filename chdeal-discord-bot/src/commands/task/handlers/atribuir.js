@@ -5,6 +5,8 @@ import { logger } from '../../../utils/logger.js';
 import { UserMapper } from '../../../utils/UserMapper.js';
 import { notificationService } from '../../../services/notificationService.js';
 import { checkCommandPermission } from '../../../utils/permissions.js';
+import { taskCache } from '../../../utils/TaskCache.js';
+
 
 // Funções fallback locais
 const localCheckUserTaskLimit = async function(userId, username, userMapper) {
@@ -159,9 +161,10 @@ export async function handleAtribuir(interaction, taskInput, discordUser, userMa
       throw new Error(`Erro ao mover task: ${error.message}`);
     }
     
-    if (!movedCard) {
-      throw new Error('Erro ao mover task para "Em Andamento"');
-    }
+    if (!movedCard) throw new Error('Erro ao mover task para "Em Andamento"');
+    taskCache.invalidateByTaskId(cardId);
+    taskCache.invalidateByPhase(pipefyService.PHASES.EM_REVISAO);
+    taskCache.invalidateByPhase(pipefyService.PHASES.CONCLUIDO);
     
     // Registrar mudança
     await trackChange(cardId, 'ATRIBUIR_TASK', username, {

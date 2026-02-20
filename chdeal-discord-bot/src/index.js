@@ -10,6 +10,8 @@ import { validateEnvironment } from './middleware/validateEnv.js';
 import { rateLimiter } from './utils/rateLimiter.js';
 import { logger } from './utils/logger.js';
 import { metrics } from './utils/metrics.js';
+import { commandErrorHandler } from './middleware/errorHandler.js';
+import { initWeeklyReset } from './utils/weeklyReset.js';
 
 // Corrigir __dirname no ES Module
 const __filename = fileURLToPath(import.meta.url);
@@ -52,7 +54,7 @@ async function loadCommands() {
           // Ignorar arquivos utilitários
           if (entry.name === 'constants.js' || 
               entry.name === 'validations.js' ||
-              entry.name === 'businessRules.js' ||
+              entry.name === 'taskUtils.js' ||
               entry.name === 'permissions.js' ||
               entry.name === 'taskHelpers.js') {
             continue;
@@ -234,26 +236,28 @@ async function handleButtonInteraction(interaction) {
     }
     
     // Botões do perfil
-    else if (interaction.customId === 'perfil_conquistas') {
-      await interaction.deferReply({ flags: 64});
-      const conquistasModule = await import('./commands/conquistas.js');
-      await conquistasModule.default.execute(interaction);
-      return;
-    }
+else if (interaction.customId.startsWith('perfil_conquistas_')) {
+  await interaction.deferReply({ flags: 64 });
+  const conquistasModule = await import('./commands/conquistas.js');
+  await conquistasModule.default.execute(interaction);
+  return;
+}
     else if (interaction.customId === 'perfil_comparar') {
       await interaction.deferReply({ flags: 64});
       // Implementar comparação se necessário
       await interaction.editReply('🔧 Funcionalidade em desenvolvimento!');
       return;
     }
-    else if (interaction.customId === 'perfil_ranking') {
-      await interaction.deferReply({ flags: 64 });
-      const rankingModule = await import('./commands/ranking.js');
-      const data = { getSubcommand: () => 'geral' };
-      interaction.options = { getString: () => 'geral' };
-      await rankingModule.default.showRankingGeral(interaction);
-      return;
-    }
+else if (interaction.customId.startsWith('perfil_ranking_')) {
+  await interaction.deferReply({ flags: 64 });
+  const rankingModule = await import('./commands/ranking.js');
+  // Simula os dados do comando para o ranking geral
+  interaction.options = {
+    getString: () => 'geral'
+  };
+  await rankingModule.default.execute(interaction);
+  return;
+}
     
     // Botões das missões
     else if (interaction.customId === 'missoes_reclamar') {
@@ -308,6 +312,8 @@ client.once('clientReady', () => {
   });
   
   client.user.setActivity('/task | Pipefy Bot', { type: 'PLAYING' });
+
+  initWeeklyReset(client);
   
   console.log(`✅ Bot online como ${client.user.tag}`);
   console.log(`📊 ${client.commands.size} comandos carregados`);
@@ -338,28 +344,15 @@ client.on('interactionCreate', async interaction => {
     // Executar comando
     await command.execute(interaction);
 
-  } catch (error) {
-    logger.error(`Erro ao executar comando`, error, {
-      command: interaction.commandName,
-      userId: interaction.user.id
-    });
-    
-    // Usar handler padronizado
-    import('../middleware/errorHandler.js')
-      .then(({ commandErrorHandler }) => {
-        return commandErrorHandler(interaction, error);
-      })
-      .catch(() => {
-        // Fallback básico
-        if (interaction.deferred || interaction.replied) {
-          return interaction.editReply('❌ Ocorreu um erro ao executar o comando.');
-        } else {
-          return interaction.reply({ 
-            content: '❌ Ocorreu um erro ao executar o comando.', 
-            flags: 64 
-          });
-        }
-      });
+ } catch (error) {
+
+  logger.error(`Erro ao executar comando`, error, {
+    command: interaction.commandName,
+    userId: interaction.user.id
+  });
+
+  await commandErrorHandler(interaction, error);
+ 
   }
 });
 

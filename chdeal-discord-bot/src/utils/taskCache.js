@@ -1,4 +1,3 @@
-// src/utils/TaskCache.js
 import { CACHE_TTL_MINUTES } from '../config/constants.js';
 import { logger } from './logger.js';
 
@@ -9,60 +8,6 @@ export class TaskCache {
     this.hits = 0;
     this.misses = 0;
     this.startCleanupInterval();
-  }
-
-    invalidateByTaskId(taskId) {
-    let invalidatedKeys = [];
-    for (const [key, value] of this.cache.entries()) {
-      if (Array.isArray(value.data)) {
-        const hasTask = value.data.some(task => task && task.id === taskId);
-        if (hasTask) {
-          this.cache.delete(key);
-          invalidatedKeys.push(key);
-        }
-      }
-    }
-    
-    if (invalidatedKeys.length > 0) {
-      logger.info('Cache invalidado por taskId', { 
-        taskId, 
-        invalidatedKeys: invalidatedKeys.length 
-      });
-    }
-  }
-
-  // NOVO: Invalida cache por fase
-  invalidateByPhase(phaseId) {
-    const phaseKeys = [
-      `phase_${phaseId}`,
-      `todo_list`,
-      `dashboard_data`
-    ];
-    
-    let invalidated = 0;
-    phaseKeys.forEach(key => {
-      if (this.cache.has(key)) {
-        this.cache.delete(key);
-        invalidated++;
-      }
-    });
-    
-    if (invalidated > 0) {
-      logger.info('Cache invalidado por fase', { phaseId, invalidated });
-    }
-  }
-
-  // NOVO: Invalida tudo relacionado a tasks
-  invalidateAllTasks() {
-    const taskKeys = Array.from(this.cache.keys()).filter(key => 
-      key.includes('phase_') || 
-      key.includes('todo') || 
-      key.includes('dashboard') ||
-      key.includes('card_')
-    );
-    
-    taskKeys.forEach(key => this.cache.delete(key));
-    logger.info('Cache de tasks completamente invalidado', { invalidated: taskKeys.length });
   }
 
   set(key, data) {
@@ -84,21 +29,6 @@ export class TaskCache {
     return item.data;
   }
 
-  clearExpired() {
-    const now = Date.now();
-    let cleared = 0;
-    for (const [key, value] of this.cache.entries()) {
-      if (now > value.expires) {
-        this.cache.delete(key);
-        cleared++;
-      }
-    }
-    if (cleared > 0) {
-      logger.debug(`Cache limpo`, { cleared, remaining: this.cache.size });
-    }
-  }
-
-  // NOVO: Invalida cache que contenha uma task específica
   invalidateByTaskId(taskId) {
     let invalidatedKeys = [];
     for (const [key, value] of this.cache.entries()) {
@@ -110,12 +40,48 @@ export class TaskCache {
         }
       }
     }
-    
     if (invalidatedKeys.length > 0) {
-      logger.info('Cache invalidado por taskId', { 
-        taskId, 
-        invalidatedKeys: invalidatedKeys.length 
-      });
+      logger.info('Cache invalidado por taskId', { taskId, invalidatedKeys: invalidatedKeys.length });
+    }
+  }
+
+  invalidateByPhase(phaseId) {
+    const phaseKeys = [
+      `phase_${phaseId}`,
+      `todo_list`,
+      `dashboard_data`
+    ];
+    let invalidated = 0;
+    phaseKeys.forEach(key => {
+      if (this.cache.has(key)) {
+        this.cache.delete(key);
+        invalidated++;
+      }
+    });
+    if (invalidated > 0) {
+      logger.info('Cache invalidado por fase', { phaseId, invalidated });
+    }
+  }
+
+  invalidateAllTasks() {
+    const taskKeys = Array.from(this.cache.keys()).filter(key => 
+      key.includes('phase_') || key.includes('todo') || key.includes('dashboard') || key.includes('card_')
+    );
+    taskKeys.forEach(key => this.cache.delete(key));
+    logger.info('Cache de tasks completamente invalidado', { invalidated: taskKeys.length });
+  }
+
+  clearExpired() {
+    const now = Date.now();
+    let cleared = 0;
+    for (const [key, value] of this.cache.entries()) {
+      if (now > value.expires) {
+        this.cache.delete(key);
+        cleared++;
+      }
+    }
+    if (cleared > 0) {
+      logger.debug('Cache limpo', { cleared, remaining: this.cache.size });
     }
   }
 
@@ -134,7 +100,7 @@ export class TaskCache {
   }
 
   startCleanupInterval() {
-    setInterval(() => this.clearExpired(), 5 * 60 * 1000); // A cada 5 minutos
+    setInterval(() => this.clearExpired(), 5 * 60 * 1000);
   }
 
   clear() {
@@ -143,3 +109,6 @@ export class TaskCache {
     logger.info('Cache completamente limpo', { previousSize: size });
   }
 }
+
+// Singleton para uso global
+export const taskCache = new TaskCache();

@@ -22,7 +22,7 @@ async function findCommandFiles(dir, commands = [], ignoreDirs = ['handlers', 'u
       // Ignorar arquivos que não são comandos principais
       if (entry.name === 'constants.js' || 
           entry.name === 'validations.js' ||
-          entry.name === 'businessRules.js' ||
+          entry.name === 'taskUtils.js' ||
           entry.name === 'permissions.js' ||
           entry.name === 'taskHelpers.js') {
         continue;

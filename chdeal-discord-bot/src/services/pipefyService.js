@@ -2,7 +2,19 @@
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 
-console.log('🔧 Pipefy Service iniciado');
+const requiredPhases = [
+  'PIPEFY_TODO_PHASE_ID',
+  'PIPEFY_EM_ANDAMENTO_PHASE_ID',
+  'PIPEFY_EM_REVISAO_PHASE_ID',
+  'PIPEFY_CONCLUIDO_PHASE_ID'
+];
+for (const phase of requiredPhases) {
+  if (!process.env[phase]) {
+    throw new Error(`❌ Variável de ambiente ${phase} não configurada. O bot não pode funcionar sem essa fase.`);
+  }
+}
+
+logger.info('🔧 Pipefy Service iniciado');
 
 // Configuração do axios
 const pipefy = axios.create({
@@ -16,15 +28,15 @@ const pipefy = axios.create({
 
 // IDs das fases
 const PHASES = {
-  BACKLOG: process.env.PIPEFY_BACKLOG_PHASE_ID || "341883328",
-  TODO: process.env.PIPEFY_TODO_PHASE_ID || "341905612",
-  EM_ANDAMENTO: process.env.PIPEFY_EM_ANDAMENTO_PHASE_ID || "341883329",
-  BLOCKED: process.env.PIPEFY_BLOCKED_PHASE_ID || "341905631",
-  EM_REVISAO: process.env.PIPEFY_EM_REVISAO_PHASE_ID || "341883330",
-  CONCLUIDO: process.env.PIPEFY_CONCLUIDO_PHASE_ID || "341883354",
+  BACKLOG: process.env.PIPEFY_BACKLOG_PHASE_ID, // opcional
+  TODO: process.env.PIPEFY_TODO_PHASE_ID,
+  EM_ANDAMENTO: process.env.PIPEFY_EM_ANDAMENTO_PHASE_ID,
+  BLOCKED: process.env.PIPEFY_BLOCKED_PHASE_ID, // opcional
+  EM_REVISAO: process.env.PIPEFY_EM_REVISAO_PHASE_ID,
+  CONCLUIDO: process.env.PIPEFY_CONCLUIDO_PHASE_ID,
 };
 
-console.log('📊 Fases configuradas:', PHASES);
+logger.info('📊 Fases configuradas:', PHASES);
 
 // Função para fazer requisições GraphQL
 async function graphqlRequest(query, variables = {}) {
@@ -57,7 +69,7 @@ async function graphqlRequest(query, variables = {}) {
 // Buscar card específico - CORRIGIDO
 async function getCard(cardId) {
   
-  console.log(`🔍 Buscando card ${cardId}`);
+  logger.info(`🔍 Buscando card ${cardId}`);
   
   const query = `
     query GetCard($id: ID!) {
@@ -90,10 +102,10 @@ async function getCard(cardId) {
 
 // Buscar cards da fase TO-DO - CORRIGIDO
 async function getCardsTodo(limit = 10) {
-  console.log(`🔍 Buscando cards da fase TO-DO (ID: ${PHASES.TODO})`);
+  logger.info(`🔍 Buscando cards da fase TO-DO (ID: ${PHASES.TODO})`);
   
   if (!PHASES.TODO) {
-    console.error('❌ Fase TO-DO não configurada');
+    logger.error('❌ Fase TO-DO não configurada');
     return [];
   }
   
@@ -124,7 +136,7 @@ async function getCardsTodo(limit = 10) {
   });
   
   if (!data?.phase?.cards?.edges) {
-    console.log('📭 Nenhum card encontrado ou erro na resposta');
+    logger.info('📭 Nenhum card encontrado ou erro na resposta');
     return [];
   }
   
@@ -133,16 +145,16 @@ async function getCardsTodo(limit = 10) {
     current_phase: { name: data.phase.name, id: PHASES.TODO }
   }));
   
-  console.log(`✅ Encontrados ${cards.length} cards`);
+  logger.info(`✅ Encontrados ${cards.length} cards`);
   return cards;
 }
 
 // Buscar cards de qualquer fase - CORRIGIDO
 async function getCardsInPhase(phaseId, limit = 10) {
-  console.log(`🔍 Buscando cards da fase ${phaseId}`);
+  logger.info(`🔍 Buscando cards da fase ${phaseId}`);
   
   if (!phaseId) {
-    console.error('❌ ID da fase não fornecido');
+    logger.error('❌ ID da fase não fornecido');
     return [];
   }
   
@@ -173,7 +185,7 @@ async function getCardsInPhase(phaseId, limit = 10) {
   });
   
   if (!data?.phase?.cards?.edges) {
-    console.log('📭 Nenhum card encontrado');
+    logger.info('📭 Nenhum card encontrado');
     return [];
   }
   
@@ -182,16 +194,16 @@ async function getCardsInPhase(phaseId, limit = 10) {
     current_phase: { name: data.phase.name, id: phaseId }
   }));
   
-  console.log(`✅ Encontrados ${cards.length} cards`);
+  logger.info(`✅ Encontrados ${cards.length} cards`);
   return cards;
 }
 
 // Mover card para outra fase
 async function moveCardToPhase(cardId, phaseId) {
-  console.log(`🔄 Movendo card ${cardId} para fase ${phaseId}`);
+  logger.info(`🔄 Movendo card ${cardId} para fase ${phaseId}`);
   
   if (!cardId || !phaseId) {
-    console.error('❌ Card ID ou Phase ID não fornecidos');
+    logger.error('❌ Card ID ou Phase ID não fornecidos');
     return null;
   }
   
@@ -223,7 +235,7 @@ async function moveCardToPhase(cardId, phaseId) {
 
 // Buscar membros do pipe - NOVA FUNÇÃO
 async function getPipeMembers() {
-  console.log('🔍 Buscando membros do pipe...');
+  logger.info('🔍 Buscando membros do pipe...');
   
   const query = `
     query GetPipeMembers($id: ID!) {
@@ -243,25 +255,25 @@ async function getPipeMembers() {
   
   if (data?.pipe?.members) {
     const members = data.pipe.members.map(m => m.user);
-    console.log(`✅ Encontrados ${members.length} membros`);
+    logger.info(`✅ Encontrados ${members.length} membros`);
     return members;
   }
   
-  console.log('❌ Não foi possível buscar membros do pipe');
+  logger.info('❌ Não foi possível buscar membros do pipe');
   return [];
 }
 
 // Função para atribuir usuário - CORRIGIDA
 // NOVA FUNÇÃO: Atribuir usuário usando a API do Pipefy (versão melhorada)
 async function assignUserToCard(cardId, username, userEmail) {
-  console.log(`👤 Tentando atribuir ${username} (${userEmail}) ao card ${cardId}`);
+  logger.info(`👤 Tentando atribuir ${username} (${userEmail}) ao card ${cardId}`);
   
   try {
     // Primeiro, buscar o ID do usuário no Pipefy pelo email
     const members = await getPipeMembers();
     
     if (members.length === 0) {
-      console.log('⚠️ Não foi possível buscar membros do pipe');
+      logger.info('⚠️ Não foi possível buscar membros do pipe');
       return await fallbackAssignment(cardId, username, userEmail);
     }
     
@@ -271,12 +283,12 @@ async function assignUserToCard(cardId, username, userEmail) {
     );
     
     if (!member) {
-      console.log(`❌ Usuário ${userEmail} não encontrado no pipe`);
-      console.log('📋 Membros disponíveis:', members.map(m => ({name: m.name, email: m.email})));
+      logger.info(`❌ Usuário ${userEmail} não encontrado no pipe`);
+      logger.info('📋 Membros disponíveis:', members.map(m => ({name: m.name, email: m.email})));
       return await fallbackAssignment(cardId, username, userEmail);
     }
     
-    console.log(`✅ Encontrado membro: ${member.name} (ID: ${member.id}, Email: ${member.email})`);
+    logger.info(`✅ Encontrado membro: ${member.name} (ID: ${member.id}, Email: ${member.email})`);
     
     // Usar a mutation de updateCard com assignee_ids
     const mutation = `
@@ -301,22 +313,22 @@ async function assignUserToCard(cardId, username, userEmail) {
       }
     };
     
-    console.log('🔄 Atribuindo usuário via assignee_ids:', variables);
+    logger.info('🔄 Atribuindo usuário via assignee_ids:', variables);
     const result = await graphqlRequest(mutation, variables);
     
     if (result?.updateCard?.card) {
-      console.log('✅ Usuário atribuído com sucesso!');
-      console.log(`👥 Assignees agora:`, result.updateCard.card.assignees);
+      logger.info('✅ Usuário atribuído com sucesso!');
+      logger.info(`👥 Assignees agora:`, result.updateCard.card.assignees);
       return result.updateCard.card;
     }
     
-    console.log('⚠️ Não foi possível atribuir via assignee_ids');
+    logger.info('⚠️ Não foi possível atribuir via assignee_ids');
     return await fallbackAssignment(cardId, username, userEmail);
     
   } catch (error) {
-    console.error('❌ Erro na atribuição:', error.message);
+    logger.error('❌ Erro na atribuição:', error.message);
     if (error.response?.data) {
-      console.error('Detalhes do erro:', JSON.stringify(error.response.data, null, 2));
+      logger.error('Detalhes do erro:', JSON.stringify(error.response.data, null, 2));
     }
     return await fallbackAssignment(cardId, username, userEmail);
   }
@@ -324,7 +336,7 @@ async function assignUserToCard(cardId, username, userEmail) {
 
 // Função de fallback melhorada
 async function fallbackAssignment(cardId, username, userEmail) {
-  console.log('🔄 Usando método fallback de atribuição...');
+  logger.info('🔄 Usando método fallback de atribuição...');
   
   try {
     // Usar os GraphQL IDs diretamente
@@ -340,11 +352,11 @@ async function fallbackAssignment(cardId, username, userEmail) {
       fieldsToUpdate[process.env.PIPEFY_FIELD_EMAIL_RESPONSAVEL_ID] = userEmail;
     }
     
-    console.log(`📝 Atualizando campos com GraphQL IDs:`, fieldsToUpdate);
+    logger.info(`📝 Atualizando campos com GraphQL IDs:`, fieldsToUpdate);
     
     if (Object.keys(fieldsToUpdate).length > 0) {
       for (const [fieldId, value] of Object.entries(fieldsToUpdate)) {
-        console.log(`  → ${fieldId}: ${value}`);
+        logger.info(`  → ${fieldId}: ${value}`);
         await updateCardField(cardId, fieldId, value);
       }
     }
@@ -357,19 +369,19 @@ async function fallbackAssignment(cardId, username, userEmail) {
       `**Status:** Atribuído nos campos personalizados`
     );
     
-    console.log('✅ Atribuição realizada com sucesso!');
+    logger.info('✅ Atribuição realizada com sucesso!');
     
     return await getCard(cardId);
     
   } catch (error) {
-    console.error('❌ Erro no método fallback:', error.message);
+    logger.error('❌ Erro no método fallback:', error.message);
     return null;
   }
 }
 
 // Remover responsável do card
 async function removeAssigneeFromCard(cardId) {
-  console.log(`👤 Removendo responsável do card ${cardId}`);
+  logger.info(`👤 Removendo responsável do card ${cardId}`);
   
   try {
     const mutation = `
@@ -396,7 +408,7 @@ async function removeAssigneeFromCard(cardId) {
     const data = await graphqlRequest(mutation, variables);
     
     if (data?.updateCard?.card) {
-      console.log('✅ Responsável removido com sucesso');
+      logger.info('✅ Responsável removido com sucesso');
       return data.updateCard.card;
     }
     
@@ -405,7 +417,7 @@ async function removeAssigneeFromCard(cardId) {
     return await getCard(cardId);
     
   } catch (error) {
-    console.error('❌ Erro ao remover responsável:', error.message);
+    logger.error('❌ Erro ao remover responsável:', error.message);
     await addComment(cardId, '🔄 Responsável removido (via comentário)');
     return await getCard(cardId);
   }
@@ -437,7 +449,7 @@ async function isUserCardAssignee(cardId, userEmail) {
     };
     
   } catch (error) {
-    console.error('❌ Erro ao verificar responsável:', error);
+    logger.error('❌ Erro ao verificar responsável:', error);
     return { isAssignee: false, reason: `Erro: ${error.message}` };
   }
 }
@@ -485,7 +497,7 @@ async function isCardAvailableInTodo(cardId, userEmail = null) {
     return { available: true, card };
     
   } catch (error) {
-    console.error('Erro ao verificar disponibilidade:', error);
+    logger.error('Erro ao verificar disponibilidade:', error);
     return { 
       available: false, 
       reason: `Erro: ${error.message || 'Permissão negada'}` 
@@ -497,7 +509,7 @@ async function isCardAvailableInTodo(cardId, userEmail = null) {
 
 // FUNÇÃO CORRIGIDA - Mutation simplificada
 async function updateCardField(cardId, fieldIdentifier, value) {
-  console.log(`📝 Atualizando campo ${fieldIdentifier} no card ${cardId}: ${value}`);
+  logger.info(`📝 Atualizando campo ${fieldIdentifier} no card ${cardId}: ${value}`);
   
   try {
     // Mutation CORRETA - sem o campo 'card_field'
@@ -517,12 +529,12 @@ async function updateCardField(cardId, fieldIdentifier, value) {
       }
     };
     
-    console.log('📤 Enviando mutation:', JSON.stringify(variables, null, 2));
+    logger.info('📤 Enviando mutation:', JSON.stringify(variables, null, 2));
     
     const result = await graphqlRequest(mutation, variables);
     
     if (result?.updateCardField) {
-      console.log('✅ Resultado:', result.updateCardField);
+      logger.info('✅ Resultado:', result.updateCardField);
       return {
         success: result.updateCardField.success === true
       };
@@ -531,11 +543,11 @@ async function updateCardField(cardId, fieldIdentifier, value) {
     return { success: false, error: 'Resposta inválida' };
     
   } catch (error) {
-    console.error(`❌ Erro ao atualizar campo ${fieldIdentifier}:`, error.message);
+    logger.error(`❌ Erro ao atualizar campo ${fieldIdentifier}:`, error.message);
     
     // Se falhar com internal_id, tentar buscar o ID numérico
     if (error.message.includes('not found') || error.message.includes('invalid')) {
-      console.log(`🔄 Tentando buscar ID numérico para ${fieldIdentifier}...`);
+      logger.info(`🔄 Tentando buscar ID numérico para ${fieldIdentifier}...`);
       
       try {
         // Primeiro, buscar o card para ver os campos
@@ -547,7 +559,7 @@ async function updateCardField(cardId, fieldIdentifier, value) {
           );
           
           if (campo && campo.field && campo.field.id) {
-            console.log(`✅ Encontrado campo: ${campo.name} (ID: ${campo.field.id})`);
+            logger.info(`✅ Encontrado campo: ${campo.name} (ID: ${campo.field.id})`);
             
             // Tentar com o ID numérico
             const mutation2 = `
@@ -566,7 +578,7 @@ async function updateCardField(cardId, fieldIdentifier, value) {
               }
             };
             
-            console.log('🔄 Tentando com ID numérico:', variables2);
+            logger.info('🔄 Tentando com ID numérico:', variables2);
             const result2 = await graphqlRequest(mutation2, variables2);
             
             if (result2?.updateCardField) {
@@ -579,7 +591,7 @@ async function updateCardField(cardId, fieldIdentifier, value) {
           }
         }
       } catch (e) {
-        console.log('Erro ao buscar ID numérico:', e.message);
+        logger.info('Erro ao buscar ID numérico:', e.message);
       }
     }
     
@@ -592,7 +604,7 @@ async function updateCardField(cardId, fieldIdentifier, value) {
 
 // Função para limpar campos de responsável
 async function clearResponsavelFields(cardId) {
-  console.log(`🧹 Limpando campos de responsável do card ${cardId}`);
+  logger.info(`🧹 Limpando campos de responsável do card ${cardId}`);
   
   const fieldsToClear = {};
   
@@ -606,7 +618,7 @@ async function clearResponsavelFields(cardId) {
   }
   
   if (Object.keys(fieldsToClear).length === 0) {
-    console.log('⚠️ Campos de responsável não configurados no .env');
+    logger.info('⚠️ Campos de responsável não configurados no .env');
     return [];
   }
   
@@ -630,7 +642,7 @@ function calculateTimeBetween(startDate, endDate) {
 
 // Função para buscar comentários de um card
 async function getCardComments(cardId) {
-  console.log(`💬 Buscando comentários do card ${cardId}`);
+  logger.info(`💬 Buscando comentários do card ${cardId}`);
   
   try {
     const query = `
@@ -657,13 +669,13 @@ async function getCardComments(cardId) {
     
     return [];
   } catch (error) {
-    console.error('❌ Erro ao buscar comentários:', error);
+    logger.error('❌ Erro ao buscar comentários:', error);
     return [];
   }
 }
 // Adicionar comentário
 async function addComment(cardId, text) {
-  console.log(`💬 Adicionando comentário ao card ${cardId}`);
+  logger.info(`💬 Adicionando comentário ao card ${cardId}`);
   
   try {
     const mutation = `
@@ -687,14 +699,14 @@ async function addComment(cardId, text) {
     const data = await graphqlRequest(mutation, variables);
     return data?.createComment?.comment;
   } catch (error) {
-    console.error('❌ Erro ao adicionar comentário:', error.message);
+    logger.error('❌ Erro ao adicionar comentário:', error.message);
     return null;
   }
 }
 
 // Testar conexão
 async function testConnection() {
-  console.log('🔗 Testando conexão com Pipefy...');
+  logger.info('🔗 Testando conexão com Pipefy...');
   
   try {
     const query = `query { me { name email } }`;
@@ -734,7 +746,7 @@ async function testConnection() {
 // Funções específicas para mover cards
 async function moveToEmAndamento(cardId) {
   if (!PHASES.EM_ANDAMENTO) {
-    console.error('❌ Fase EM_ANDAMENTO não configurada');
+    logger.error('❌ Fase EM_ANDAMENTO não configurada');
     return null;
   }
   return moveCardToPhase(cardId, PHASES.EM_ANDAMENTO);
@@ -742,7 +754,7 @@ async function moveToEmAndamento(cardId) {
 
 async function moveToConcluido(cardId) {
   if (!PHASES.CONCLUIDO) {
-    console.error('❌ Fase CONCLUIDO não configurada');
+    logger.error('❌ Fase CONCLUIDO não configurada');
     return null;
   }
   return moveCardToPhase(cardId, PHASES.CONCLUIDO);
@@ -750,7 +762,7 @@ async function moveToConcluido(cardId) {
 
 async function moveToRevisao(cardId) {
   if (!PHASES.EM_REVISAO) {
-    console.error('❌ Fase EM_REVISAO não configurada');
+    logger.error('❌ Fase EM_REVISAO não configurada');
     return null;
   }
   return moveCardToPhase(cardId, PHASES.EM_REVISAO);

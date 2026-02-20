@@ -1,6 +1,6 @@
 // src/commands/task/utils/validations.js
 import { logger } from '../../../utils/logger.js';
-import { TASK_TIMEOUT_HOURS, TASK_WARNING_HOURS } from '../constants.js';
+import { TASK_TIMEOUT_HOURS, TASK_WARNING_HOURS } from '../../../config/constants.js';
 
 /**
  * Valida um ID de card do Pipefy

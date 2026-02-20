@@ -17,11 +17,13 @@ export async function handleInfo(interaction, rawCardId) {
     
     const descricao = getCardDescription(card);
     const deadlineInfo = checkTaskDeadline(card);
+
+    const embedColor = deadlineInfo.status === 'atrasada' ? '#FF0000' :
+                   deadlineInfo.status === 'alerta' ? '#FF9900' : '#00FF00';
     
     const embed = new EmbedBuilder()
       .setTitle(`📄 ${card.title}`)
-      .setColor(deadlineInfo.status === 'atrasada' ? '#FF0000' : 
-                deadlineInfo.status === 'alerta' ? '#FF9900' : '#FF9900')
+      .setColor(embedColor)
       .setDescription(`Detalhes da task no Pipefy`)
       .addFields(
         { name: '🆔 ID', value: `\`${card.id}\``, inline: true },

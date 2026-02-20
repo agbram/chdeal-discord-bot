@@ -1,5 +1,5 @@
 import { SlashCommandBuilder } from 'discord.js';
-import { logger } from '../../utils/logger.js';
+import  logger  from '../../utils/logger.js';
 
 // Importar handlers - NÃO importar checkTaskDeadline de nenhum lugar aqui
 import { handleTest } from './handlers/test.js';
@@ -14,7 +14,7 @@ import { handleAtribuir } from './handlers/atribuir.js';
 import { handleMinhas } from './handlers/minhas.js';
 
 // Importar constantes
-import { DEFAULT_TASK_LIMIT } from './constants.js';
+import { DEFAULT_TASK_LIMIT } from '../../config/constants.js';
 
 // NÃO exportar checkTaskDeadline aqui!
 // Exportar apenas os handlers necessários

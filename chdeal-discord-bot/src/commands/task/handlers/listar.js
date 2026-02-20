@@ -2,7 +2,7 @@
 import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import pipefyService from '../../../services/pipefyService.js';
 import { logger } from '../../../utils/logger.js';
-import { DEFAULT_TASK_LIMIT, MAX_TASKS_PER_LIST } from '../constants.js';
+import { DEFAULT_TASK_LIMIT, MAX_TASKS_PER_LIST } from '../../../config/constants.js';
 
 export async function handleListar(interaction, filtro, limite) {
   await interaction.deferReply();

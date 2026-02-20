@@ -1,12 +1,13 @@
-// src/commands/task/handlers/concluir.js
 import { EmbedBuilder } from 'discord.js';
 import pipefyService from '../../../services/pipefyService.js';
 import { logger } from '../../../utils/logger.js';
 import { UserMapper } from '../../../utils/UserMapper.js';
-import { validateCardId } from '../utils/validations.js';
-import { trackChange } from '../utils/businessRules.js';
+import { validateCardId, detectTaskType } from '../utils/validations.js';
+import { trackChange } from '../utils/taskUtils.js';
 import { checkTaskPermission } from '../utils/permissions.js';
 import { sanitizeComentario } from '../../../utils/sanitize.js';
+import { taskCache } from '../../../utils/TaskCache.js';
+import { gamificationService } from '../../../services/gamificationService.js';
 
 const userMapperInstance = new UserMapper();
 
@@ -50,9 +51,34 @@ export async function handleConcluir(interaction, rawCardId, rawComentario) {
     }
     
     const movedCard = await pipefyService.moveToRevisao(cardId);
-    
-    if (!movedCard) {
-      throw new Error('Erro ao mover task para "Revisão"');
+    if (!movedCard) throw new Error('Erro ao mover task para "Revisão"');
+
+    // Invalida cache
+    taskCache.invalidateByTaskId(cardId);
+    taskCache.invalidateByPhase(pipefyService.PHASES.EM_ANDAMENTO); // origem
+    taskCache.invalidateByPhase(pipefyService.PHASES.EM_REVISAO);   // destino
+
+    // Calcular tempo gasto
+    const tempoTotal = ((Date.now() - new Date(card.createdAt).getTime()) / (1000 * 60 * 60)).toFixed(2);
+    const timeSpent = parseFloat(tempoTotal);
+
+    // Gamificação para quem concluiu
+    const levelUp = gamificationService.addPoints(
+      userId,
+      50, // pontos base
+      'task_completed',
+      {
+        taskId: cardId,
+        timeSpent,
+        taskType: detectTaskType(card)
+      }
+    );
+
+    if (levelUp.leveledUp) {
+      await interaction.followUp({
+        content: `🎉 **Parabéns!** Você subiu para o nível **${levelUp.levelName}**!`,
+        ephemeral: true
+      });
     }
 
     await trackChange(cardId, 'CONCLUIR_TASK', username, {
@@ -67,8 +93,6 @@ export async function handleConcluir(interaction, rawCardId, rawComentario) {
       `👨‍💻 **Concluído por:** ${username}\n` +
       `📊 **Status:** Em Revisão`
     );
-    
-    const tempoDecorrido = ((Date.now() - new Date(card.createdAt).getTime()) / (1000 * 60 * 60)).toFixed(2);
     
     const embed = new EmbedBuilder()
       .setTitle('📋 Task em Revisão!')

@@ -1,11 +1,13 @@
-// src/commands/task/handlers/aprovar.js
 import { EmbedBuilder } from 'discord.js';
 import pipefyService from '../../../services/pipefyService.js';
 import { logger } from '../../../utils/logger.js';
 import { validateCardId } from '../utils/validations.js';
-import { validateRequiredFields, trackChange } from '../utils/businessRules.js';
+import { validateRequiredFields, trackChange } from '../utils/taskUtils.js';
 import { checkCommandPermission } from '../../../utils/permissions.js';
 import { sanitizeComentario } from '../../../utils/sanitize.js';
+import { taskCache } from '../../../utils/TaskCache.js';
+import { gamificationService } from '../../../services/gamificationService.js';
+import { UserMapper } from '../../../utils/UserMapper.js';
 
 export async function handleAprovar(interaction, rawCardId, rawComentario) {
   await interaction.deferReply();
@@ -40,10 +42,11 @@ export async function handleAprovar(interaction, rawCardId, rawComentario) {
     }
     
     const movedCard = await pipefyService.moveToConcluido(cardId);
-    
-    if (!movedCard) {
-      throw new Error('Erro ao aprovar task');
-    }
+    if (!movedCard) throw new Error('Erro ao aprovar task');
+
+    taskCache.invalidateByTaskId(cardId);
+    taskCache.invalidateByPhase(pipefyService.PHASES.EM_REVISAO);
+    taskCache.invalidateByPhase(pipefyService.PHASES.CONCLUIDO);
     
     await trackChange(cardId, 'APROVAR_TASK', username, {
       previousPhase: 'Em Revisão',
@@ -56,6 +59,36 @@ export async function handleAprovar(interaction, rawCardId, rawComentario) {
       `📝 **Comentário:** ${comentarioSanitizado}\n` +
       `👑 **Aprovado por:** ${username}\n` +
       `🎉 **Status:** Concluída`
+    );
+
+    // ========== GAMIFICAÇÃO PARA O DESENVOLVEDOR ==========
+    const desenvolvedor = card.assignees?.[0];
+    if (desenvolvedor && desenvolvedor.email) {
+      const userMapper = new UserMapper();
+      const discordId = userMapper.getDiscordIdentifier(desenvolvedor.email);
+      if (discordId) {
+        // Verificar se foi primeira aprovação (sem comentários de correção)
+        const comments = await pipefyService.getCardComments(cardId);
+        const hasCorrection = comments.some(c => 
+          c.text && /correção|ajuste|alterar|refazer/i.test(c.text)
+        );
+        const firstTry = !hasCorrection;
+
+        gamificationService.addPoints(
+          discordId,
+          30, // pontos por aprovação
+          'task_approved',
+          { taskId: cardId, firstTry }
+        );
+      }
+    }
+
+    // ========== GAMIFICAÇÃO PARA QUEM APROVOU ==========
+    gamificationService.addPoints(
+      interaction.user.id,
+      10, // pontos por revisão
+      'task_reviewed',
+      { taskId: cardId }
     );
     
     const tempoTotal = ((Date.now() - new Date(card.createdAt).getTime()) / (1000 * 60 * 60)).toFixed(2);

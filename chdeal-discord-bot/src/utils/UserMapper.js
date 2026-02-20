@@ -46,6 +46,10 @@ export class UserMapper {
         this.reverseEmailMap.set(email, discordIdentifier);
       }
 
+        for (const [discordId, email] of this.userMappings.entries()) {
+        this.reverseEmailMap.set(email.toLowerCase(), discordId);
+      }
+
       for (const [discordIdentifier, fullname] of Object.entries(fullnameMappings)) {
         this.fullnameMappings.set(discordIdentifier, fullname);
       }
@@ -57,6 +61,17 @@ export class UserMapper {
       console.error('Erro crítico ao carregar mapeamentos:', error);
     }
   }
+
+  getDiscordIdentifier(email) {
+  // Procura pelo email no mapa reverso (se você já criou) ou percorre o mapa
+  for (const [discordId, userEmail] of this.userMappings.entries()) {
+    if (userEmail.toLowerCase() === email.toLowerCase()) {
+      return discordId;
+    }
+  }
+  return null;
+}
+
 
   // MÉTODO CORRETO: getFullName (com N maiúsculo)
   getFullName(discordIdentifier) {
@@ -114,4 +129,13 @@ export class UserMapper {
       fullname: this.getFullName(discordId)
     }));
   }
+
+  getStats() {
+    return {
+      totalMapped: this.userMappings.size,
+      totalFullnames: this.fullnameMappings.size
+    };
+  }
 }
+
+export const userMapper = new UserMapper();

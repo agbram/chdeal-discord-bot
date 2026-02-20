@@ -4,9 +4,11 @@ import pipefyService from '../../../services/pipefyService.js';
 import { logger } from '../../../utils/logger.js';
 import { UserMapper } from '../../../utils/UserMapper.js';
 import { validateCardId } from '../utils/validations.js';
-import { trackChange } from '../utils/businessRules.js';
+import { trackChange } from '../utils/taskUtils.js';
 import { calculateResponsabilityTime } from '../utils/taskHelpers.js';
 import { checkTaskPermission } from '../utils/permissions.js';
+import { taskCache } from '../../../utils/TaskCache.js';
+
 
 const userMapperInstance = new UserMapper();
 
@@ -63,9 +65,11 @@ export async function handleLiberar(interaction, rawCardId) {
     await pipefyService.clearResponsavelFields(cardId);
     const movedCard = await pipefyService.moveCardToPhase(cardId, pipefyService.PHASES.TODO);
     
-    if (!movedCard) {
-      throw new Error('Erro ao mover task para "TO-DO"');
-    }
+    if (!movedCard)  throw new Error('Erro ao mover task para "TO-DO"');
+
+     taskCache.invalidateByTaskId(cardId);
+     taskCache.invalidateByPhase(pipefyService.PHASES.EM_REVISAO);
+     taskCache.invalidateByPhase(pipefyService.PHASES.CONCLUIDO);
     
     await trackChange(cardId, 'LIBERAR_TASK', username, {
       previousPhase: 'Em Andamento',

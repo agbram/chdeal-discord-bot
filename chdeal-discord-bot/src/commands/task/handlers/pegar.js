@@ -3,6 +3,8 @@ import pipefyService from '../../../services/pipefyService.js';
 import { logger } from '../../../utils/logger.js';
 import { notificationService } from '../../../services/notificationService.js';
 import { UserMapper } from '../../../utils/UserMapper.js';
+import { checkUserTaskLimit } from '../utils/taskUtils.js';
+import { taskCache } from '../../../utils/TaskCache.js'; // <-- ADICIONADO
 
 export async function handlePegar(interaction, cardId) {
   try {
@@ -33,6 +35,13 @@ export async function handlePegar(interaction, cardId) {
       });
       return;
     }
+
+    // Verificar limite de tasks
+    const limitCheck = await checkUserTaskLimit(discordUserId, interaction.user.username, userMapper);
+    if (!limitCheck.allowed) {
+      await interaction.editReply(`❌ ${limitCheck.reason}`);
+      return;
+    }
     
     logger.info(`Usuário pegando task`, {
       userId: discordUserId,
@@ -61,6 +70,11 @@ export async function handlePegar(interaction, cardId) {
       });
       return;
     }
+
+    // Invalidar cache após mover a task
+    taskCache.invalidateByTaskId(cardId);
+    taskCache.invalidateByPhase(pipefyService.PHASES.TODO);
+    taskCache.invalidateByPhase(pipefyService.PHASES.EM_ANDAMENTO);
     
     // ATUALIZAÇÃO CRÍTICA: Usar a função assignUserToCard que faz TUDO
     logger.info(`Atribuindo usuário ${userEmail} ao card ${cardId}...`);

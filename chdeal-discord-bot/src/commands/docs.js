@@ -1,7 +1,8 @@
-// src/commands/docs.js
 import { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, codeBlock } from 'discord.js';
 import { metrics } from '../utils/metrics.js';
 import { rateLimiter } from '../utils/rateLimiter.js';
+import { taskCache } from '../utils/TaskCache.js';
+import { userMapper } from '../utils/UserMapper.js';
 
 export default {
   data: new SlashCommandBuilder()
@@ -20,24 +21,14 @@ export default {
     ),
 
   async execute(interaction) {
-    await interaction.deferReply({ flags: 64});
-    
+    await interaction.deferReply({ flags: 64 });
     const secao = interaction.options.getString('secao') || 'comandos';
-    
     try {
       switch(secao) {
-        case 'comandos':
-          await showComandos(interaction);
-          break;
-        case 'status':
-          await showStatus(interaction);
-          break;
-        case 'config':
-          await showConfig(interaction);
-          break;
-        case 'utils':
-          await showUtils(interaction);
-          break;
+        case 'comandos': return await showComandos(interaction);
+        case 'status':   return await showStatus(interaction);
+        case 'config':   return await showConfig(interaction);
+        case 'utils':    return await showUtils(interaction);
       }
     } catch (error) {
       console.error('Erro no comando docs:', error);
@@ -113,23 +104,8 @@ async function showComandos(interaction) {
 
 async function showStatus(interaction) {
   const metricsData = metrics.getStats();
-
-let cacheStats = { size: 0, hitRate: '0%', hits: 0, misses: 0 };
-    try {
-        const { taskCacheInstance } = await import('../utils/taskCache.js');
-        cacheStats = taskCacheInstance.getStats();
-    } catch (error) {
-        console.warn('Cache não disponível:', error.message);
-    }
-
-        let userStats = { totalMapped: 0, totalFullnames: 0 };
-    try {
-        const { userMapperInstance } = await import('../commands/task/index.js');
-        const userStats = userMapperInstance.getStats();
-    } catch (error) {
-        console.warn('UserMapper não disponível:', error.message);
-    }
-
+  const cacheStats = taskCache.getStats();
+  const userStats = userMapper.getStats();
   const rateLimitStats = rateLimiter.getStats();
 
   const embed = new EmbedBuilder()
@@ -196,7 +172,6 @@ let cacheStats = { size: 0, hitRate: '0%', hits: 0, misses: 0 };
   }
 
   embed.setTimestamp();
-
   await interaction.editReply({ embeds: [embed] });
 }
 

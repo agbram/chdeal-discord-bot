@@ -1,4 +1,3 @@
-// src/middleware/validateEnv.js
 export function validateEnvironment() {
   const requiredEnvVars = [
     'DISCORD_TOKEN',
@@ -48,14 +47,15 @@ export function validateEnvironment() {
     return false;
   }
 
-  // Validação de números
+  // ✅ DEFINIÇÃO DA VARIÁVEL numericVars (estava faltando)
   const numericVars = ['MAX_TASKS_PER_USER', 'TASK_TIMEOUT_HOURS', 'TASK_WARNING_HOURS'];
-  numericVars.forEach(varName => {
+
+  for (const varName of numericVars) {
     if (process.env[varName] && isNaN(parseInt(process.env[varName]))) {
       console.error(`❌ ERRO: ${varName} deve ser um número`);
       return false;
     }
-  });
+  }
 
   console.log('✅ Ambiente validado com sucesso');
   return true;

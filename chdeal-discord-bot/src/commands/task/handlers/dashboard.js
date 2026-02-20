@@ -2,7 +2,7 @@
 import { EmbedBuilder } from 'discord.js';
 import pipefyService from '../../../services/pipefyService.js';
 import { logger } from '../../../utils/logger.js';
-import { TASK_TIMEOUT_HOURS } from '../constants.js';
+import { TASK_TIMEOUT_HOURS } from '../../../config/constants.js';
 import { checkTaskDeadline } from '../utils/validations.js'; 
 
 export async function handleDashboard() {
